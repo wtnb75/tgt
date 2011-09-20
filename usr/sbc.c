@@ -233,7 +233,7 @@ static int sbc_service_action(int host_no, struct scsi_cmd *cmd)
 	if (cmd->scb[1] != SAI_READ_CAPACITY_16)
 		goto sense;
 
-	if (scsi_get_in_length(cmd) < 12)
+	if (scsi_get_in_length(cmd) < 16)
 		goto overflow;
 
 	len = min_t(int, len, scsi_get_in_length(cmd));
@@ -246,6 +246,12 @@ static int sbc_service_action(int host_no, struct scsi_cmd *cmd)
 
 	*((uint64_t *)(data)) = __cpu_to_be64(size - 1);
 	data[2] = __cpu_to_be32(1UL << bshift);
+	// XXX!
+	uint8_t *buf=(uint8_t *)&data[3];
+	buf[0]=0;
+	buf[1]=3;
+	buf[2]=0x80|0x40;
+	buf[3]=0;
 
 overflow:
 	scsi_set_in_resid_by_actual(cmd, len);
@@ -498,6 +504,8 @@ static struct device_type_template sbc_template = {
 		{spc_illegal_op,},
 
 		[0xb0 ... 0xff] = {spc_illegal_op},
+		[0x42] = {sbc_rw,},
+		[0x93] = {sbc_rw,},
 	}
 };
 
