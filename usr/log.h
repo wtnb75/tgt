@@ -31,12 +31,14 @@
 #define likely(x)       __builtin_expect(!!(x), 1)
 #define unlikely(x)     __builtin_expect(!!(x), 0)
 
+#ifdef __linux__
 union semun {
 	int val;
 	struct semid_ds *buf;
 	unsigned short int *array;
 	struct seminfo *__buf;
 };
+#endif
 
 #define LOG_SPACE_SIZE 16384
 #define MAX_MSG_SIZE 256

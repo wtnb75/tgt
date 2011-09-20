@@ -438,10 +438,12 @@ static int sbc_new(int op, char *path, char *capacity, char *media_type)
 			perror("Failed creating file");
 			exit(2);
 		}
+#ifndef __FreeBSD__
 		if (posix_fallocate(fd, 0, size*1024*1024LL) == -1) {
 			perror("posix_fallocate failed.");
 			exit(3);
 		}
+#endif
 
 		free(buf);
 		close(fd);

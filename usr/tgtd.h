@@ -243,7 +243,11 @@ typedef void (*sched_event_handler_t)(struct event_data *tev);
 extern void tgt_init_sched_event(struct event_data *evt,
 			  sched_event_handler_t sched_handler, void *data);
 
+#ifdef __linux__
 typedef void (*event_handler_t)(int fd, int events, void *data);
+#else
+typedef void (*event_handler_t)(int fd, short events, void *data);
+#endif
 
 extern int tgt_event_add(int fd, int events, event_handler_t handler, void *data);
 extern void tgt_event_del(int fd);
@@ -326,6 +330,9 @@ struct event_data {
 	};
 	void *data;
 	struct list_head e_list;
+#ifndef __linux__
+	struct event ev;
+#endif
 };
 
 int call_program(const char *cmd,

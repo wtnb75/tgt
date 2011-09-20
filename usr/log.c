@@ -263,10 +263,22 @@ static void log_syslog (void * buff)
 	syslog(msg->prio, "%s", (char *)&msg->str);
 }
 
-static void dolog(int prio, const char *fmt, va_list ap)
+static void dolog(int prio, const char *fmt1, va_list ap)
 {
 	struct timespec ts;
 	struct sembuf ops;
+	char *fmt=fmt1;
+#ifndef __linux__
+	char *p=strstr(fmt, "%m");
+	if(p!=NULL){
+		unsigned int pos=p-fmt;
+		unsigned int len=strlen(fmt)+100;
+		fmt=malloc(len);
+		memcpy(fmt, fmt1, pos);
+		strerror_r(errno, fmt+pos, 100);
+		strcat(fmt, fmt1+pos+2);
+	}
+#endif
 
 	if (la) {
 		ts.tv_sec = 0;
@@ -292,6 +304,9 @@ static void dolog(int prio, const char *fmt, va_list ap)
 		vfprintf(stderr, fmt, ap);
 		fflush(stderr);
 	}
+#ifndef __linux__
+	if(fmt!=fmt1){ free(fmt); }
+#endif
 }
 
 void log_warning(const char *fmt, ...)

@@ -1,3 +1,9 @@
+OS=$(shell uname)
+ifeq ($(OS),FreeBSD)
+CFLAGS += -I/usr/local/include -include epoll2event.h -Ifreebsd
+LIBS += -levent -L/usr/local/lib
+endif
+
 sbindir ?= $(PREFIX)/sbin
 
 ifneq ($(shell test -e /usr/include/linux/signalfd.h && echo 1),)
@@ -11,7 +17,11 @@ endif
 TGTD_OBJS += $(addprefix iscsi/, conn.o param.o session.o \
 		iscsid.o target.o chap.o sha1.o md5.o transport.o iscsi_tcp.o \
 		isns.o)
+ifeq ($(OS),Linux)
 TGTD_OBJS += bs_rdwr.o bs_aio.o
+else
+TGTD_OBJS += bs_rdwr.o
+endif
 
 ifneq ($(ISCSI_RDMA),)
 TGTD_OBJS += iscsi/iser.o iscsi/iser_text.o

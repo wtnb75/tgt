@@ -61,20 +61,26 @@ static int set_keepalive(int fd)
 	if (ret)
 		return ret;
 
+#ifdef TCP_KEEPIDLE
 	opt = 1800;
 	ret = setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &opt, sizeof(opt));
 	if (ret)
 		return ret;
+#endif
 
+#ifdef TCP_KEEPCNT
 	opt = 6;
 	ret = setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &opt, sizeof(opt));
 	if (ret)
 		return ret;
+#endif
 
+#ifdef TCP_KEEPINTVL
 	opt = 300;
 	ret = setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &opt, sizeof(opt));
 	if (ret)
 		return ret;
+#endif
 
 	return 0;
 }
@@ -347,7 +353,11 @@ static size_t iscsi_tcp_write_begin(struct iscsi_connection *conn, void *buf,
 	struct iscsi_tcp_connection *tcp_conn = TCP_CONN(conn);
 	int opt = 1;
 
+#ifdef TCP_CORK
 	setsockopt(tcp_conn->fd, SOL_TCP, TCP_CORK, &opt, sizeof(opt));
+#elif defined(TCP_NOPUSH)
+	setsockopt(tcp_conn->fd, IPPROTO_TCP, TCP_NOPUSH, &opt, sizeof(opt));
+#endif
 	return write(tcp_conn->fd, buf, nbytes);
 }
 
@@ -356,7 +366,11 @@ static void iscsi_tcp_write_end(struct iscsi_connection *conn)
 	struct iscsi_tcp_connection *tcp_conn = TCP_CONN(conn);
 	int opt = 0;
 
+#ifdef TCP_CORK
 	setsockopt(tcp_conn->fd, SOL_TCP, TCP_CORK, &opt, sizeof(opt));
+#elif defined(TCP_NOPUSH)
+	setsockopt(tcp_conn->fd, IPPROTO_TCP, TCP_NOPUSH, &opt, sizeof(opt));
+#endif
 }
 
 static size_t iscsi_tcp_close(struct iscsi_connection *conn)

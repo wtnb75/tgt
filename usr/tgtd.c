@@ -45,7 +45,11 @@
 unsigned long pagesize, pageshift;
 
 int system_active = 1;
+#ifdef __linux__
 static int ep_fd;
+#else
+static struct event_base *ev_base;
+#endif
 static char program_name[] = "tgtd";
 static LIST_HEAD(tgt_events_list);
 static LIST_HEAD(tgt_sched_events_list);
@@ -94,6 +98,7 @@ static void signal_catch(int signo) {
 
 static int oom_adjust(void)
 {
+#ifdef __linux__
 	int fd, err;
 	char path[64];
 
@@ -111,11 +116,13 @@ static int oom_adjust(void)
 		return errno;
 	}
 	close(fd);
+#endif
 	return 0;
 }
 
 static int nr_file_adjust(void)
 {
+#ifdef __linux__
 	int ret, fd, max = 1024 * 1024;
 	char path[] = "/proc/sys/fs/nr_open";
 	char buf[64];
@@ -143,12 +150,15 @@ set_rlimit:
 	if (ret < 0)
 		fprintf(stderr, "can't adjust nr_open %d %m\n", max);
 
+#endif
 	return 0;
 }
 
 int tgt_event_add(int fd, int events, event_handler_t handler, void *data)
 {
+#ifdef __linux__
 	struct epoll_event ev;
+#endif
 	struct event_data *tev;
 	int err;
 
@@ -160,10 +170,16 @@ int tgt_event_add(int fd, int events, event_handler_t handler, void *data)
 	tev->handler = handler;
 	tev->fd = fd;
 
+#ifdef __linux__
 	memset(&ev, 0, sizeof(ev));
 	ev.events = events;
 	ev.data.ptr = tev;
 	err = epoll_ctl(ep_fd, EPOLL_CTL_ADD, fd, &ev);
+#else
+	event_set(&tev->ev, fd, EV_PERSIST|events, handler, data);
+	event_base_set(ev_base, &tev->ev);
+	err = event_add(&tev->ev, NULL);
+#endif
 	if (err) {
 		eprintf("Cannot add fd, %m\n");
 		free(tev);
@@ -195,7 +211,11 @@ void tgt_event_del(int fd)
 		return;
 	}
 
+#ifdef __linux__
 	ret = epoll_ctl(ep_fd, EPOLL_CTL_DEL, fd, NULL);
+#else
+	ret = event_del(&tev->ev);
+#endif
 	if (ret < 0)
 		eprintf("fail to remove epoll event, %s\n", strerror(errno));
 
@@ -205,7 +225,9 @@ void tgt_event_del(int fd)
 
 int tgt_event_modify(int fd, int events)
 {
+#ifdef __linux__
 	struct epoll_event ev;
+#endif
 	struct event_data *tev;
 
 	tev = tgt_event_lookup(fd);
@@ -214,11 +236,18 @@ int tgt_event_modify(int fd, int events)
 		return -EINVAL;
 	}
 
+#ifdef __linux
 	memset(&ev, 0, sizeof(ev));
 	ev.events = events;
 	ev.data.ptr = tev;
 
 	return epoll_ctl(ep_fd, EPOLL_CTL_MOD, fd, &ev);
+#else
+	event_del(&tev->ev);
+	event_set(&tev->ev, fd, EV_PERSIST|events, tev->handler, tev->data);
+	event_base_set(ev_base, &tev->ev);
+	return event_add(&tev->ev, NULL);
+#endif
 }
 
 void tgt_init_sched_event(struct event_data *evt,
@@ -378,8 +407,9 @@ static int tgt_exec_scheduled(void)
 	return work_remains;
 }
 
-static void event_loop(void)
+static void tgt_event_loop(void)
 {
+#ifdef __linux__
 	int nevent, i, sched_remains, timeout;
 	struct epoll_event events[1024];
 	struct event_data *tev;
@@ -403,6 +433,9 @@ retry:
 
 	if (system_active)
 		goto retry;
+#else
+	event_base_dispatch(ev_base);
+#endif
 }
 
 static int lld_init(char *args)
@@ -521,11 +554,19 @@ int main(int argc, char **argv)
 		}
 	}
 
+#ifdef __linux__
 	ep_fd = epoll_create(4096);
 	if (ep_fd < 0) {
 		fprintf(stderr, "can't create epoll fd, %m\n");
 		exit(1);
 	}
+#else
+	ev_base = event_base_new();
+	if (ev_base==NULL) {
+		fprintf(stderr, "can't create event_base\n");
+		exit(1);
+	}
+#endif
 
 	nr_lld = lld_init(argv[optind]);
 	if (!nr_lld) {
@@ -558,7 +599,7 @@ int main(int argc, char **argv)
 
 	bs_init();
 
-	event_loop();
+	tgt_event_loop();
 
 	lld_exit();
 

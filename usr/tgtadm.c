@@ -315,6 +315,9 @@ static int filter(const struct dirent *dir)
 static int bus_to_host(char *bus)
 {
 	int i, nr, host = -1;
+#ifndef PATH_MAX
+#define PATH_MAX FILENAME_MAX
+#endif
 	char path[PATH_MAX], *p;
 	char key[] = "host";
 	struct dirent **namelist;
@@ -719,7 +722,7 @@ int main(int argc, char **argv)
 				tid = GLOBAL_TID;
 			break;
 		case OP_UNBIND:
-			rc = verify_mode_params(argc, argv, "LmotuOC");
+			rc = verify_mode_params(argc, argv, "LmotuC");
 			if (rc) {
 				eprintf("target mode: option '-%c' is not "
 					  "allowed/supported\n", rc);

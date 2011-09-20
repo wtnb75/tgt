@@ -454,6 +454,7 @@ static int ipc_accept(int accept_fd)
 
 static int ipc_perm(int fd)
 {
+#ifdef SO_PEERCRED
 	struct ucred cred;
 	socklen_t len;
 	int err;
@@ -468,6 +469,7 @@ static int ipc_perm(int fd)
 	if (cred.uid || cred.gid)
 		return -EPERM;
 
+#endif
 	return 0;
 }
 
