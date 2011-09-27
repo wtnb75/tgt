@@ -1,7 +1,11 @@
 OS=$(shell uname)
 ifeq ($(OS),FreeBSD)
-CFLAGS += -I/usr/local/include -include epoll2event.h -Ifreebsd
+CFLAGS += -I/usr/local/include -include freebsd/epoll2event.h -Ifreebsd
 LIBS += -levent -L/usr/local/lib
+endif
+ifeq ($(OS),DragonFly)
+CFLAGS += -I/usr/pkg/include -include dragonfly/epoll2event.h -Idragonfly
+LIBS += -levent -L/usr/pkg/lib
 endif
 
 sbindir ?= $(PREFIX)/sbin
