@@ -1,7 +1,9 @@
 #ifndef __EPOLL2EVENT_H__
 #define  __EPOLL2EVENT_H__
 
+#include <pthread.h>
 #include <event.h>
+#include <netinet/in_systm.h>
 #define EPOLLIN   EV_READ
 #define EPOLLOUT  EV_WRITE
 #define EPOLLERR  EV_SIGNAL|EV_TIMEOUT
@@ -11,6 +13,7 @@
 #define s6_addr32 __u6_addr.__u6_addr32
 
 #define O_LARGEFILE 0
+#define O_DIRECT 0
 typedef off_t loff_t;
 
 #define lseek64(a,b,c)      lseek(a,b,c)

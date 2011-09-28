@@ -1,6 +1,10 @@
 #ifndef __LIST_H__
 #define __LIST_H__
 
+#ifdef LIST_HEAD
+#undef LIST_HEAD
+#endif
+
 /* taken from linux kernel */
 
 #undef offsetof

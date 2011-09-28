@@ -7,6 +7,10 @@ ifeq ($(OS),DragonFly)
 CFLAGS += -I/usr/pkg/include -include dragonfly/epoll2event.h -Idragonfly
 LIBS += -levent -L/usr/pkg/lib
 endif
+ifeq ($(OS),OpenBSD)
+CFLAGS += -I/usr/local/include -include openbsd/epoll2event.h -Iopenbsd
+LIBS += -levent -L/usr/local/lib
+endif
 
 sbindir ?= $(PREFIX)/sbin
 
@@ -18,15 +22,18 @@ ifneq ($(shell test -e /usr/include/sys/timerfd.h && echo 1),)
 CFLAGS += -DUSE_TIMERFD
 endif
 
-CFLAGS += -Wno-unused-but-set-variable
-
 TGTD_OBJS += $(addprefix iscsi/, conn.o param.o session.o \
 		iscsid.o target.o chap.o sha1.o md5.o transport.o iscsi_tcp.o \
 		isns.o)
-ifeq ($(OS),Linux)
-TGTD_OBJS += bs_rdwr.o bs_aio.o
-else
+
 TGTD_OBJS += bs_rdwr.o
+ifeq ($(OS),Linux)
+TGTD_OBJS += bs_sg.o bs_aio.o
+CFLAGS += -Wno-unused-but-set-variable
+else
+ifneq ($(OS),OpenBSD)
+TGTD_OBJS += bs_sg.o
+endif
 endif
 
 ifneq ($(ISCSI_RDMA),)
@@ -52,7 +59,7 @@ PROGRAMS += tgtd tgtadm tgtimg
 TGTD_OBJS += tgtd.o mgmt.o target.o scsi.o log.o driver.o util.o work.o \
 		parser.o spc.o sbc.o mmc.o osd.o scc.o smc.o \
 		ssc.o bs_ssc.o libssc.o \
-		bs_null.o bs_sg.o bs.o libcrc32c.o
+		bs_null.o bs.o libcrc32c.o
 
 TGTD_DEP = $(TGTD_OBJS:.o=.d)
 

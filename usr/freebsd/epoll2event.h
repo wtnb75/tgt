@@ -6,11 +6,9 @@
 #define EPOLLOUT  EV_WRITE
 #define EPOLLERR  EV_SIGNAL|EV_TIMEOUT
 
-#ifdef __FreeBSD__
 #define s6_addr8  __u6_addr.__u6_addr8
 #define s6_addr16 __u6_addr.__u6_addr16
 #define s6_addr32 __u6_addr.__u6_addr32
-#endif
 
 #define O_LARGEFILE 0
 typedef off_t loff_t;
