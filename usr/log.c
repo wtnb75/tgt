@@ -267,7 +267,7 @@ static void dolog(int prio, const char *fmt1, va_list ap)
 {
 	struct timespec ts;
 	struct sembuf ops;
-	char *fmt=fmt1;
+	char *fmt=(char *)fmt1;
 #ifndef __linux__
 	char *p=strstr(fmt, "%m");
 	if(p!=NULL){
