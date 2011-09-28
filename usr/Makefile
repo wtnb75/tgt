@@ -11,6 +11,10 @@ ifeq ($(OS),OpenBSD)
 CFLAGS += -I/usr/local/include -include openbsd/epoll2event.h -Iopenbsd
 LIBS += -levent -L/usr/local/lib
 endif
+ifeq ($(OS),NetBSD)
+CFLAGS += -I/usr/pkg/include -include netbsd/epoll2event.h -Inetbsd
+LIBS += -levent -L/usr/pkg/lib
+endif
 
 sbindir ?= $(PREFIX)/sbin
 
@@ -30,10 +34,12 @@ TGTD_OBJS += bs_rdwr.o
 ifeq ($(OS),Linux)
 TGTD_OBJS += bs_sg.o bs_aio.o
 CFLAGS += -Wno-unused-but-set-variable
-else
-ifneq ($(OS),OpenBSD)
+endif
+ifeq ($(OS),FreeBSD)
 TGTD_OBJS += bs_sg.o
 endif
+ifeq ($(OS),DragonFly)
+TGTD_OBJS += bs_sg.o
 endif
 
 ifneq ($(ISCSI_RDMA),)

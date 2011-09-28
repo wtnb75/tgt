@@ -31,7 +31,7 @@
 #define likely(x)       __builtin_expect(!!(x), 1)
 #define unlikely(x)     __builtin_expect(!!(x), 0)
 
-#ifdef __linux__
+#if defined(__linux__) || defined(__NetBSD__)
 union semun {
 	int val;
 	struct semid_ds *buf;
