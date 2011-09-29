@@ -15,6 +15,11 @@ ifeq ($(OS),NetBSD)
 CFLAGS += -I/usr/pkg/include -include netbsd/epoll2event.h -Inetbsd
 LIBS += -levent -L/usr/pkg/lib
 endif
+ifeq ($(OS),SunOS)
+CFLAGS += -include solaris/epoll2event.h -Isolaris
+LIBS += -levent -lsocket -lnsl -L/usr/local/lib
+TGTADM_LIBS += -lsocket -lnsl
+endif
 
 sbindir ?= $(PREFIX)/sbin
 
@@ -78,7 +83,7 @@ tgtd: $(TGTD_OBJS)
 -include $(TGTD_DEP)
 
 tgtadm: tgtadm.o
-	$(CC) $^ -o $@
+	$(CC) $^ -o $@ $(TGTADM_LIBS)
 
 -include tgtadm.d
 
