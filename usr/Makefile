@@ -39,6 +39,7 @@ TGTD_OBJS += bs_rdwr.o
 ifeq ($(OS),Linux)
 TGTD_OBJS += bs_sg.o bs_aio.o
 CFLAGS += -Wno-unused-but-set-variable
+LIBS += -ldl
 endif
 ifeq ($(OS),FreeBSD)
 TGTD_OBJS += bs_sg.o
@@ -46,6 +47,8 @@ endif
 ifeq ($(OS),DragonFly)
 TGTD_OBJS += bs_sg.o
 endif
+
+LIBS += -rdynamic
 
 ifneq ($(ISCSI_RDMA),)
 TGTD_OBJS += iscsi/iser.o iscsi/iser_text.o

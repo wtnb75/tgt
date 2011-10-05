@@ -32,14 +32,18 @@
 #include <sys/types.h>
 #include <sys/epoll.h>
 #include <linux/types.h>
+#include <dlfcn.h>
 
 #include "list.h"
 #include "tgtd.h"
 #include "tgtadm_error.h"
 #include "util.h"
 #include "bs_thread.h"
+#include "tgtadm.h"
+#include "parser.h"
 
 static LIST_HEAD(bst_list);
+static pthread_mutex_t bst_lock=PTHREAD_MUTEX_INITIALIZER;
 
 static LIST_HEAD(finished_list);
 static pthread_mutex_t finished_lock;
@@ -55,7 +59,13 @@ static pthread_cond_t finished_cond;
 
 int register_backingstore_template(struct backingstore_template *bst)
 {
+	if(get_backingstore_template(bst->bs_name)!=NULL){
+		eprintf("bs name %s is already installed.\n", bst->bs_name);
+		return -1;
+	}
+	pthread_mutex_lock(&bst_lock);
 	list_add(&bst->backingstore_siblings, &bst_list);
+	pthread_mutex_unlock(&bst_lock);
 
 	return 0;
 }
@@ -64,11 +74,63 @@ struct backingstore_template *get_backingstore_template(const char *name)
 {
 	struct backingstore_template *bst;
 
+	pthread_mutex_lock(&bst_lock);
 	list_for_each_entry(bst, &bst_list, backingstore_siblings) {
-		if (!strcmp(name, bst->bs_name))
+		if (!strcmp(name, bst->bs_name)){
+			pthread_mutex_unlock(&bst_lock);
 			return bst;
+		}
 	}
+	pthread_mutex_unlock(&bst_lock);
 	return NULL;
+}
+
+int backingstore_show(char *buf, size_t rest)
+{
+	int total=0, max=rest;
+	struct backingstore_template *bst;
+	pthread_mutex_lock(&bst_lock);
+	shprintf(total, buf, rest, "Backing-Store:\n");
+	list_for_each_entry(bst, &bst_list, backingstore_siblings) {
+		shprintf(total, buf, rest, _TAB1 "%s\n", bst->bs_name);
+	}
+	pthread_mutex_unlock(&bst_lock);
+	return total;
+overflow:
+	pthread_mutex_unlock(&bst_lock);
+	return max;
+}
+
+int backingstore_new(char *buf, size_t sz)
+{
+	enum{ Opt_path, Opt_err, };
+	match_table_t tokens = {
+		{Opt_path, "path=%s"},
+		{Opt_err, NULL},
+	};
+	char *path=NULL;
+	char *p;
+	while((p=strsep(&buf, ","))!=NULL){
+		substring_t args[MAX_OPT_ARGS];
+		int token;
+		if(!*p) continue;
+		token=match_token(p, tokens, args);
+		switch(token){
+		case Opt_path:
+			path=match_strdup(&args[0]);
+			break;
+		default:
+			break;
+		}
+	}
+	if(path==NULL) return -1;
+	void *hdl __attribute__((unused))=dlopen(path, RTLD_LAZY);
+	if(hdl!=NULL){
+		eprintf("%s successfully loaded.\n", path);
+	}else{
+		eprintf("%s\n", dlerror());
+	}
+	return 0;
 }
 
 /* threading helper functions */

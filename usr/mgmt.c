@@ -380,6 +380,31 @@ static int connection_mgmt(int lld_no, struct mgmt_task *mtask,
 	return err;
 }
 
+static int backingstore_mgmt(int lld_no, struct mgmt_task *mtask)
+{
+	int err;
+	switch (mtask->req.op) {
+	case OP_SHOW:
+		err = backingstore_show(mtask->buf, mtask->bsize);
+		set_show_results(&mtask->rsp, &err);
+		break;
+	case OP_NEW:
+		err = backingstore_new(mtask->buf, mtask->bsize);
+		set_show_results(&mtask->rsp, &err);
+		break;
+#if 0
+	case OP_DELETE:
+		err = backingstore_delete(mtask->buf, mtask->bsize);
+		set_show_results(&mtask->rsp, &err);
+		break;
+#endif
+	default:
+		eprintf("Unsupported op: %d\n", mtask->req.op);
+		err = -1;
+	}
+	return err;
+}
+
 static int tgt_mgmt(struct mgmt_task *mtask)
 {
 	struct tgtadm_req *req = &mtask->req;
@@ -420,6 +445,9 @@ static int tgt_mgmt(struct mgmt_task *mtask)
 		break;
 	case MODE_CONNECTION:
 		err = connection_mgmt(lld_no, mtask, req, rsp);
+		break;
+	case MODE_BACKINGSTORE:
+		err = backingstore_mgmt(lld_no, mtask);
 		break;
 	default:
 		if (req->op == OP_SHOW && tgt_drivers[lld_no]->show) {

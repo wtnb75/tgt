@@ -390,6 +390,8 @@ static int str_to_mode(char *str)
 		return MODE_ACCOUNT;
 	else if (!strcmp("stats", str))
 		return MODE_STATS;
+	else if (!strcmp("backingstore", str) || !strcmp("bs", str))
+		return MODE_BACKINGSTORE;
 	else {
 		eprintf("unknown mode: %s\n", str);
 		exit(1);
@@ -830,6 +832,22 @@ int main(int argc, char **argv)
 					"portal mode\n", op);
 			exit(EINVAL);
 			break;
+		}
+	}
+	if (mode == MODE_BACKINGSTORE) {
+		switch (op) {
+		case OP_NEW:
+			rc = verify_mode_params(argc, argv, "Lmoftb");
+			if (rc) {
+				eprintf("option '-%c' not supported in "
+					"backingstore mode\n", rc);
+				exit(EINVAL);
+			}
+			if (!path) {
+				eprintf("'backing-store' option "
+						"is necessary\n");
+				exit(EINVAL);
+			}
 		}
 	}
 

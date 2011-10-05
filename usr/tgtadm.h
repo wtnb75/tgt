@@ -27,6 +27,7 @@ enum tgtadm_mode {
 	MODE_CONNECTION,
 	MODE_ACCOUNT,
 	MODE_STATS,
+	MODE_BACKINGSTORE,
 };
 
 enum tgtadm_account_dir {

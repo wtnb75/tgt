@@ -313,6 +313,8 @@ extern int dtd_load_unload(int tid, uint64_t lun, int load, char *file);
 
 extern int register_backingstore_template(struct backingstore_template *bst);
 extern struct backingstore_template *get_backingstore_template(const char *name);
+extern int backingstore_show(char *buf, size_t rest);
+extern int backingstore_new(char *buf, size_t sz);
 
 extern int setup_param(char *name, int (*parser)(char *));
 
