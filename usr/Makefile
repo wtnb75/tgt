@@ -1,4 +1,8 @@
-OS=$(shell uname)
+OS=$(shell uname | cut -f1 -d-)
+ifeq ($(OS),CYGWIN_NT)
+OS=Cygwin
+endif
+
 ifeq ($(OS),FreeBSD)
 CFLAGS += -I/usr/local/include -include freebsd/epoll2event.h -Ifreebsd
 LIBS += -levent -L/usr/local/lib
@@ -19,6 +23,10 @@ ifeq ($(OS),SunOS)
 CFLAGS += -include solaris/epoll2event.h -Isolaris
 LIBS += -levent -lsocket -lnsl -L/usr/local/lib
 TGTADM_LIBS += -lsocket -lnsl
+endif
+ifeq ($(OS),Cygwin)
+CFLAGS += -include cygwin/epoll2event.h -Icygwin
+LIBS += -levent -L/usr/local/lib
 endif
 
 sbindir ?= $(PREFIX)/sbin
@@ -48,7 +56,9 @@ ifeq ($(OS),DragonFly)
 TGTD_OBJS += bs_sg.o
 endif
 
+ifneq ($(OS),Cygwin)
 LIBS += -rdynamic
+endif
 
 ifneq ($(ISCSI_RDMA),)
 TGTD_OBJS += iscsi/iser.o iscsi/iser_text.o
@@ -64,7 +74,10 @@ CFLAGS += -g -O0 -ggdb -rdynamic
 else
 CFLAGS += -g -O2 -fno-strict-aliasing
 endif
-CFLAGS += -Wall -Wstrict-prototypes -fPIC
+CFLAGS += -Wall -Wstrict-prototypes
+ifneq ($(OS),Cygwin)
+CFLAGS += -fPIC
+endif
 CFLAGS += -DTGT_VERSION=\"$(VERSION)$(EXTRAVERSION)\"
 
 LIBS += -lpthread

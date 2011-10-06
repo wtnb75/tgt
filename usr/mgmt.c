@@ -483,7 +483,7 @@ static int ipc_accept(int accept_fd)
 static int ipc_perm(int fd)
 {
 #ifdef SO_PEERCRED
-#ifndef __OpenBSD__
+#if !defined(__OpenBSD__) && !defined(__CYGWIN__)
 	struct ucred cred;
 	socklen_t len;
 	int err;

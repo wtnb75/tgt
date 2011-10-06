@@ -32,6 +32,7 @@
  */
 #include "crc32c.h"
 #include <asm/byteorder.h>
+#include "util.h"
 
 /*
  * MODULE_AUTHOR("Clay Haapala <chaapala@cisco.com>");
