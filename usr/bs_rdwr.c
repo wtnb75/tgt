@@ -38,6 +38,14 @@
 #include "scsi.h"
 #include "bs_thread.h"
 
+#include <sys/ioctl.h>
+#ifdef __linux__
+#include <linux/fs.h>  // BLKDISCARD
+#endif
+#ifdef __FreeBSD__
+#include <sys/disk.h>  // DIOCGDELETE
+#endif
+
 static void set_medium_error(int *result, uint8_t *key, uint16_t *asc)
 {
 	*result = SAM_STAT_CHECK_CONDITION;
@@ -53,6 +61,23 @@ static void bs_sync_sync_range(struct scsi_cmd *cmd, uint32_t length,
 	ret = fdatasync(cmd->dev->fd);
 	if (ret)
 		set_medium_error(result, key, asc);
+}
+
+static int discard(int fd, loff_t offset, unsigned int length){
+	dprintf("discard: fd=%d, offset=%lu, length=%d\n", fd, offset, length);
+#ifdef BLKDISCARD
+	unsigned long l[2];
+	l[0]=offset;
+	l[1]=length;
+	return ioctl(fd, BLKDISCARD, &l);
+#endif
+#ifdef BIOCGDELETE
+	off_t l[2];
+	l[0]=offset;
+	l[1]=length;
+	return ioctl(fd, BIOCGDELETE, &l);
+#endif
+	return 0;
 }
 
 static void bs_rdwr_request(struct scsi_cmd *cmd)
@@ -112,6 +137,31 @@ static void bs_rdwr_request(struct scsi_cmd *cmd)
 
 		if (ret != length)
 			set_medium_error(&result, &key, &asc);
+		break;
+	case WRITE_SAME_16:
+		length = scsi_rw_count(cmd->scb) << cmd->dev->blk_shift;
+		discard(fd, cmd->offset, length);
+		scsi_set_result(cmd, SAM_STAT_GOOD);
+		break;
+	case UNMAP:
+		{
+			int plen=cmd->scb[8];
+			unsigned char *buf=scsi_get_out_buffer(cmd);
+			int plen2=__be16_to_cpu(*(unsigned short *)&buf[0]);
+			int plen8=__be16_to_cpu(*(unsigned short *)&buf[2]);
+			if(plen!=scsi_get_out_length(cmd) ||
+			   plen2!=plen-2 || plen8!=plen-8){
+				eprintf("unmap: length mismatch: %d/%d/%d/%d\n", plen, scsi_get_out_length(cmd), plen2, plen8);
+			}
+			if(plen<8 || (plen-8)%16!=0){
+				eprintf("unmap: plen error: %d\n", plen);
+			}
+			int i;
+			for(i=0; i<(plen-8)/16; ++i){
+				discard(fd, __be64_to_cpu(*(loff_t *)&buf[i*16+8]), __be32_to_cpu(*(unsigned int *)&buf[i*16+8+8]));
+			}
+		}
+		scsi_set_result(cmd, SAM_STAT_GOOD);
 		break;
 	default:
 		break;
