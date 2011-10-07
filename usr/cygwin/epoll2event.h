@@ -20,4 +20,6 @@ typedef off_t loff_t;
 // #define __cpu_to_le32(x) htole32(x)
 #define __le32_to_cpu(x) le32toh(x)
 
+#define MSG_MORE	0
+
 #endif // __EPOLL2EVENT_H__

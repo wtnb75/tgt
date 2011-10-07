@@ -24,4 +24,6 @@ typedef off_t loff_t;
 #define stat64            stat
 #define fstat64           fstat
 
+#define MSG_MORE	0
+
 #endif // __EPOLL2EVENT_H__

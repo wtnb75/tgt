@@ -16,4 +16,6 @@
 #define O_DIRECT 0   // XXX!
 typedef off_t loff_t;
 
+#define MSG_MORE	0
+
 #endif // __EPOLL2EVENT_H__
