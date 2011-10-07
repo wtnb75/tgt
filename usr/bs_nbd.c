@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <netdb.h>
 #include <string.h>
 #include <sys/epoll.h>
@@ -51,15 +52,17 @@ struct nbdconn{
 	struct list_head cmds;
 };
 
-void nbdconn_init(struct nbdconn *c, char *path)
+static void nbdconn_init(struct nbdconn *c, char *path)
 {
 	c->path=strdup(path);
 	pthread_mutex_init(&c->lock, NULL);
 	INIT_LIST_HEAD(&c->cmds);
 }
-int nbdconn_connect(struct nbdconn *c)
+
+static int connect_in(char *path)
 {
-	char *addr=strdup(c->path);
+	int fd=-1;
+	char *addr=strdup(path);
 	char *port=strrchr(addr, '@');
 	if(port==NULL){
 		port=strrchr(addr, ':');
@@ -67,7 +70,7 @@ int nbdconn_connect(struct nbdconn *c)
 	if(port==NULL){
 		eprintf("no port number\n");
 		free(addr);
-		goto err_exit;
+		return -1;
 	}
 	*port=0;
 	port++;
@@ -80,28 +83,56 @@ int nbdconn_connect(struct nbdconn *c)
 	free(addr);
 	if(err){
 		eprintf("getaddrinfo: %s\n", gai_strerror(err));
-		goto err_exit;
+		return -1;
 	}
 	for(rp=res; rp!=NULL; rp=rp->ai_next){
-		c->fd=socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
-		if(c->fd==-1){
+		fd=socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+		if(fd==-1){
 			eprintf("socket: %m\n");
 			continue;
 		}
-		if(connect(c->fd, rp->ai_addr, rp->ai_addrlen)!=-1){
+		if(connect(fd, rp->ai_addr, rp->ai_addrlen)!=-1){
 			break;
 		}
-		close(c->fd);
+		close(fd);
 	}
 	if(rp==NULL){
-		eprintf("can't connect to %s\n", c->path);
+		eprintf("can't connect to %s\n", path);
 		freeaddrinfo(res);
-		goto err_exit;
+		return -1;
 	}
 	freeaddrinfo(res);
+	return fd;
+}
+
+static int connect_un(char *path)
+{
+	// unix domain socket
+	int fd=socket(AF_UNIX, SOCK_STREAM, 0);
+	if(fd==-1){
+		eprintf("socket: %m\n");
+		return -1;
+	}
+	struct sockaddr_un unaddr;
+	unaddr.sun_family=AF_UNIX;
+	strncpy(unaddr.sun_path, path, sizeof(unaddr.sun_path));
+	if(connect(fd, (struct sockaddr *)&unaddr, sizeof(unaddr))==-1){
+		close(fd);
+		return -1;
+	}
+	return fd;
+}
+
+static int nbdconn_connect(struct nbdconn *c)
+{
+	if(c->path[0]=='/'){
+		c->fd=connect_un(c->path);
+	}else{
+		c->fd=connect_in(c->path);
+	}
 	// recv nego
 	char buf[8+8+8+4+124];
-	err=recv(c->fd, buf, sizeof(buf), MSG_WAITALL);
+	int err=recv(c->fd, buf, sizeof(buf), MSG_WAITALL);
 	if(err!=sizeof(buf)){
 		eprintf("can't recv nego(%d): %m\n", err);
 		goto err_exit;
@@ -122,7 +153,7 @@ err_exit:
 	return -1;
 }
 
-void nbdconn_close(struct nbdconn *c)
+static void nbdconn_close(struct nbdconn *c)
 {
 	// send disconnect request, close
 	struct nbdreq req;
@@ -137,7 +168,7 @@ void nbdconn_close(struct nbdconn *c)
 	free(c->path);
 }
 
-void nbdconn_reconnect(struct nbdconn *c)
+static void nbdconn_reconnect(struct nbdconn *c)
 {
 	struct nbdreq req;
 	memset(&req, 0, sizeof(req));
