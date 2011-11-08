@@ -42,7 +42,7 @@
 #include "tgtadm.h"
 #include "parser.h"
 
-static LIST_HEAD(bst_list);
+LIST_HEAD(bst_list);
 static pthread_mutex_t bst_lock=PTHREAD_MUTEX_INITIALIZER;
 
 static LIST_HEAD(finished_list);
