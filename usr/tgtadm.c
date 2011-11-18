@@ -420,6 +420,15 @@ static int str_to_op(char *str)
 	}
 }
 
+static void bad_optarg(int ret, int ch, char *optarg)
+{
+	if (ret == ERANGE)
+		fprintf(stderr, "-%c argument value '%s' out of range\n", ch, optarg);
+	else
+		fprintf(stderr, "-%c argument value '%s' invalid\n", ch, optarg);
+	usage(ret);
+}
+
 static int verify_mode_params(int argc, char **argv, char *allowed)
 {
 	int ch, longindex;
@@ -490,20 +499,24 @@ int main(int argc, char **argv)
 			mode = str_to_mode(optarg);
 			break;
 		case 't':
-			tid = strtol(optarg, NULL, 10);
-			if (errno == EINVAL) {
-				eprintf("invalid tid '%s'\n", optarg);
-				exit(EINVAL);
-			}
+			rc = str_to_val(optarg, tid, 0, INT_MAX);
+			if (rc)
+				bad_optarg(rc, ch, optarg);
 			break;
 		case 's':
-			sid = strtoull(optarg, NULL, 10);
+			rc = str_to_val(optarg, sid, 0, ULLONG_MAX);
+			if (rc)
+				bad_optarg(rc, ch, optarg);
 			break;
 		case 'c':
-			cid = strtoul(optarg, NULL, 10);
+			rc = str_to_val(optarg, cid, 0, UINT_MAX);
+			if (rc)
+				bad_optarg(rc, ch, optarg);
 			break;
 		case 'l':
-			lun = strtoull(optarg, NULL, 10);
+			rc = str_to_val(optarg, lun, 0, ULLONG_MAX);
+			if (rc)
+				bad_optarg(rc, ch, optarg);
 			break;
 		case 'P':
 			if (mode == MODE_PORTAL)
@@ -539,7 +552,9 @@ int main(int argc, char **argv)
 			hostno = bus_to_host(optarg);
 			break;
 		case 'H':
-			hostno = strtol(optarg, NULL, 10);
+			rc = str_to_val(optarg, hostno, 0, UINT_MAX);
+			if (rc)
+				bad_optarg(rc, ch, optarg);
 			break;
 		case 'F':
 			force = 1;
@@ -560,7 +575,9 @@ int main(int argc, char **argv)
 			ac_dir = ACCOUNT_TYPE_OUTGOING;
 			break;
 		case 'C':
-			control_port = strtol(optarg, NULL, 10);
+			rc = str_to_val(optarg, control_port, 0, USHRT_MAX);
+			if (rc)
+				bad_optarg(rc, ch, optarg);
 			break;
 		case 'V':
 			version();
