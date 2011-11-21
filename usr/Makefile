@@ -45,7 +45,7 @@ TGTD_OBJS += $(addprefix iscsi/, conn.o param.o session.o \
 
 TGTD_OBJS += bs_rdwr.o
 ifeq ($(OS),Linux)
-TGTD_OBJS += bs_sg.o bs_aio.o
+TGTD_OBJS += bs_sg.o
 CFLAGS += -Wno-unused-but-set-variable
 LIBS += -ldl
 endif
@@ -58,6 +58,12 @@ endif
 
 ifneq ($(OS),Cygwin)
 LIBS += -rdynamic
+endif
+
+ifneq ($(shell test -e /usr/include/sys/eventfd.h && test -e /usr/include/libaio.h && echo 1),)
+CFLAGS += -DUSE_EVENTFD
+TGTD_OBJS += bs_aio.o
+LIBS += -laio
 endif
 
 ifneq ($(ISCSI_RDMA),)
