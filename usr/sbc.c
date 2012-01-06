@@ -229,6 +229,7 @@ static int sbc_service_action(int host_no, struct scsi_cmd *cmd)
 	unsigned int bshift;
 	uint64_t size;
 	int len = 32;
+	int val;
 
 	if (cmd->scb[1] != SAI_READ_CAPACITY_16)
 		goto sense;
@@ -252,6 +253,9 @@ static int sbc_service_action(int host_no, struct scsi_cmd *cmd)
 	buf[1]=3;
 	buf[2]=0x80|0x40;
 	buf[3]=0;
+
+	val = (cmd->dev->attrs.lbppbe << 16) | cmd->dev->attrs.la_lba;
+	data[3] = __cpu_to_be32(val);
 
 overflow:
 	scsi_set_in_resid_by_actual(cmd, len);
