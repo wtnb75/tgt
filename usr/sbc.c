@@ -247,12 +247,6 @@ static int sbc_service_action(int host_no, struct scsi_cmd *cmd)
 
 	*((uint64_t *)(data)) = __cpu_to_be64(size - 1);
 	data[2] = __cpu_to_be32(1UL << bshift);
-	// XXX!
-	uint8_t *buf=(uint8_t *)&data[3];
-	buf[0]=0;
-	buf[1]=3;
-	buf[2]=0x80|0x40;
-	buf[3]=0;
 
 	val = (cmd->dev->attrs.lbppbe << 16) | cmd->dev->attrs.la_lba;
 	data[3] = __cpu_to_be32(val);
