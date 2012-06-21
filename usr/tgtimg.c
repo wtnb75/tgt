@@ -452,10 +452,12 @@ static int sbc_new(int op, char *path, char *capacity, char *media_type, int thi
 				exit(5);
 			}
 		} else {
+#ifndef __DragonFly__
 			if (posix_fallocate(fd, 0, size*1024*1024LL) == -1) {
 				perror("posix_fallocate failed.");
 				exit(3);
 			}
+#endif
 		}
 
 		free(buf);

@@ -5,7 +5,9 @@
 #include <endian.h>
 #include <errno.h>
 #include <fcntl.h>
+#ifdef __linux__
 #include <linux/falloc.h>
+#endif
 #include <signal.h>
 #include <syscall.h>
 #include <unistd.h>
@@ -14,7 +16,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <limits.h>
+#ifdef __linux__
 #include <linux/types.h>
+#endif
 
 #include "be_byteshift.h"
 
