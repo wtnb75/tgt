@@ -19,7 +19,7 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
  * 02110-1301 USA
  */
-#define _XOPEN_SOURCE 500
+#define _XOPEN_SOURCE 600
 
 #include <errno.h>
 #include <fcntl.h>
@@ -27,6 +27,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <linux/fs.h>
@@ -63,23 +65,6 @@ static void bs_sync_sync_range(struct scsi_cmd *cmd, uint32_t length,
 		set_medium_error(result, key, asc);
 }
 
-static int discard(int fd, loff_t offset, unsigned int length){
-	dprintf("discard: fd=%d, offset=%lu, length=%d\n", fd, offset, length);
-#ifdef BLKDISCARD
-	unsigned long l[2];
-	l[0]=offset;
-	l[1]=length;
-	return ioctl(fd, BLKDISCARD, &l);
-#endif
-#ifdef BIOCGDELETE
-	off_t l[2];
-	l[0]=offset;
-	l[1]=length;
-	return ioctl(fd, BIOCGDELETE, &l);
-#endif
-	return 0;
-}
-
 static void bs_rdwr_request(struct scsi_cmd *cmd)
 {
 	int ret, fd = cmd->dev->fd;
@@ -87,6 +72,10 @@ static void bs_rdwr_request(struct scsi_cmd *cmd)
 	int result = SAM_STAT_GOOD;
 	uint8_t key;
 	uint16_t asc;
+	char *tmpbuf;
+	size_t blocksize;
+	uint64_t offset = cmd->offset;
+	uint32_t tl     = cmd->tl;
 
 	ret = length = 0;
 	key = asc = 0;
@@ -111,7 +100,7 @@ static void bs_rdwr_request(struct scsi_cmd *cmd)
 	case WRITE_16:
 		length = scsi_get_out_length(cmd);
 		ret = pwrite64(fd, scsi_get_out_buffer(cmd), length,
-			       cmd->offset);
+			       offset);
 		if (ret == length) {
 			/*
 			 * it would be better not to access to pg
@@ -126,6 +115,47 @@ static void bs_rdwr_request(struct scsi_cmd *cmd)
 		} else
 			set_medium_error(&result, &key, &asc);
 
+		if ((cmd->scb[0] != WRITE_6) && (cmd->scb[1] & 0x10))
+			posix_fadvise(fd, offset, length,
+				      POSIX_FADV_NOREUSE);
+
+		break;
+	case WRITE_SAME:
+	case WRITE_SAME_16:
+		/* WRITE_SAME used to punch hole in file */
+		if (cmd->scb[1] & 0x08) {
+			ret = unmap_file_region(fd, offset, tl);
+			if (ret != 0) {
+				eprintf("Failed to punch hole for WRITE_SAME"
+					" command\n");
+				result = SAM_STAT_CHECK_CONDITION;
+				key = HARDWARE_ERROR;
+				asc = ASC_INTERNAL_TGT_FAILURE;
+				break;
+			}
+			break;
+		}
+		while (tl > 0) {
+			blocksize = 1 << cmd->dev->blk_shift;
+			tmpbuf = scsi_get_out_buffer(cmd);
+
+			switch(cmd->scb[1] & 0x06) {
+			case 0x02: /* PBDATA==0 LBDATA==1 */
+				put_unaligned_be32(offset, tmpbuf);
+				break;
+			case 0x04: /* PBDATA==1 LBDATA==0 */
+				/* physical sector format */
+				put_unaligned_be64(offset, tmpbuf);
+				break;
+			}
+
+			ret = pwrite64(fd, tmpbuf, blocksize, offset);
+			if (ret != blocksize)
+				set_medium_error(&result, &key, &asc);
+
+			offset += blocksize;
+			tl     -= blocksize;
+		}
 		break;
 	case READ_6:
 	case READ_10:
@@ -133,35 +163,101 @@ static void bs_rdwr_request(struct scsi_cmd *cmd)
 	case READ_16:
 		length = scsi_get_in_length(cmd);
 		ret = pread64(fd, scsi_get_in_buffer(cmd), length,
-			      cmd->offset);
+			      offset);
 
 		if (ret != length)
 			set_medium_error(&result, &key, &asc);
+
+		if ((cmd->scb[0] != READ_6) && (cmd->scb[1] & 0x10))
+			posix_fadvise(fd, offset, length,
+				      POSIX_FADV_NOREUSE);
+
 		break;
-	case WRITE_SAME_16:
-		length = scsi_rw_count(cmd->scb) << cmd->dev->blk_shift;
-		discard(fd, cmd->offset, length);
-		scsi_set_result(cmd, SAM_STAT_GOOD);
+	case PRE_FETCH_10:
+	case PRE_FETCH_16:
+		ret = posix_fadvise(fd, offset, cmd->tl,
+				POSIX_FADV_WILLNEED);
+
+		if (ret != 0)
+			set_medium_error(&result, &key, &asc);
+		break;
+	case VERIFY_10:
+	case VERIFY_12:
+	case VERIFY_16:
+		length = scsi_get_out_length(cmd);
+
+		tmpbuf = malloc(length);
+		if (!tmpbuf) {
+			result = SAM_STAT_CHECK_CONDITION;
+			key = HARDWARE_ERROR;
+			asc = ASC_INTERNAL_TGT_FAILURE;
+			break;
+		}
+
+		ret = pread64(fd, tmpbuf, length, offset);
+
+		if (ret != length)
+			set_medium_error(&result, &key, &asc);
+		else if (memcmp(scsi_get_out_buffer(cmd), tmpbuf, length)) {
+			result = SAM_STAT_CHECK_CONDITION;
+			key = MISCOMPARE;
+			asc = ASC_MISCOMPARE_DURING_VERIFY_OPERATION;
+		}
+
+		if (cmd->scb[1] & 0x10)
+			posix_fadvise(fd, offset, length,
+				      POSIX_FADV_NOREUSE);
+
+		free(tmpbuf);
 		break;
 	case UNMAP:
-		{
-			int plen=cmd->scb[8];
-			unsigned char *buf=scsi_get_out_buffer(cmd);
-			int plen2=__be16_to_cpu(*(unsigned short *)&buf[0]);
-			int plen8=__be16_to_cpu(*(unsigned short *)&buf[2]);
-			if(plen!=scsi_get_out_length(cmd) ||
-			   plen2!=plen-2 || plen8!=plen-8){
-				eprintf("unmap: length mismatch: %d/%d/%d/%d\n", plen, scsi_get_out_length(cmd), plen2, plen8);
-			}
-			if(plen<8 || (plen-8)%16!=0){
-				eprintf("unmap: plen error: %d\n", plen);
-			}
-			int i;
-			for(i=0; i<(plen-8)/16; ++i){
-				discard(fd, __be64_to_cpu(*(loff_t *)&buf[i*16+8]), __be32_to_cpu(*(unsigned int *)&buf[i*16+8+8]));
-			}
+		if (!cmd->dev->attrs.thinprovisioning) {
+			result = SAM_STAT_CHECK_CONDITION;
+			key = ILLEGAL_REQUEST;
+			asc = ASC_INVALID_FIELD_IN_CDB;
+			break;
 		}
-		scsi_set_result(cmd, SAM_STAT_GOOD);
+
+		length = scsi_get_out_length(cmd);
+		tmpbuf = scsi_get_out_buffer(cmd);
+
+		if (length < 8)
+			break;
+
+		length -= 8;
+		tmpbuf += 8;
+
+		while (length >= 16) {
+			offset = get_unaligned_be64(&tmpbuf[0]);
+			offset = offset << cmd->dev->blk_shift;
+
+			tl = get_unaligned_be32(&tmpbuf[8]);
+			tl = tl << cmd->dev->blk_shift;
+
+			if (offset + tl > cmd->dev->size) {
+				eprintf("UNMAP beyond EOF\n");
+				result = SAM_STAT_CHECK_CONDITION;
+				key = ILLEGAL_REQUEST;
+				asc = ASC_LBA_OUT_OF_RANGE;
+				break;
+			}
+
+			if (tl > 0) {
+				if (unmap_file_region(fd, offset, tl) != 0) {
+					eprintf("Failed to punch hole for"
+						" UNMAP at offset:%" PRIu64
+						" length:%d\n",
+						offset, tl);
+					result = SAM_STAT_CHECK_CONDITION;
+					key = HARDWARE_ERROR;
+					asc = ASC_INTERNAL_TGT_FAILURE;
+					break;
+				}
+			}
+
+			length -= 16;
+			tmpbuf += 16;
+		}
 		break;
 	default:
 		break;
@@ -173,22 +269,28 @@ static void bs_rdwr_request(struct scsi_cmd *cmd)
 
 	if (result != SAM_STAT_GOOD) {
 		eprintf("io error %p %x %d %d %" PRIu64 ", %m\n",
-			cmd, cmd->scb[0], ret, length, cmd->offset);
+			cmd, cmd->scb[0], ret, length, offset);
 		sense_data_build(cmd, key, asc);
 	}
 }
 
 static int bs_rdwr_open(struct scsi_lu *lu, char *path, int *fd, uint64_t *size)
 {
-	*fd = backed_file_open(path, O_RDWR|O_LARGEFILE|lu->bsoflags, size);
+	uint32_t blksize = 0;
+
+	*fd = backed_file_open(path, O_RDWR|O_LARGEFILE|lu->bsoflags, size,
+				&blksize);
 	/* If we get access denied, try opening the file in readonly mode */
 	if (*fd == -1 && (errno == EACCES || errno == EROFS)) {
 		*fd = backed_file_open(path, O_RDONLY|O_LARGEFILE|lu->bsoflags,
-				       size);
+				       size, &blksize);
 		lu->attrs.readonly = 1;
 	}
 	if (*fd < 0)
 		return *fd;
+
+	if (!lu->attrs.no_auto_lbppbe)
+		update_lbppbe(lu, blksize);
 
 	return 0;
 }
@@ -200,7 +302,7 @@ static void bs_rdwr_close(struct scsi_lu *lu)
 
 int nr_iothreads = 16;
 
-static int bs_rdwr_init(struct scsi_lu *lu)
+static tgtadm_err bs_rdwr_init(struct scsi_lu *lu)
 {
 	struct bs_thread_info *info = BS_THREAD_I(lu);
 

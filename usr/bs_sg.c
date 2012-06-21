@@ -301,19 +301,27 @@ static void bs_sg_cmd_complete(int fd, int events, void *data)
 static int get_bsg_major(char *path)
 {
 	FILE *devfd;
-	char majorno[8];
+	int majorno, n;
 	char dev[64];
 	char tmp[16];
 
 	sscanf(path, "/dev/bsg/%s", tmp);
 	sprintf(dev, "/sys/class/bsg/%s/dev", tmp);
 	devfd = fopen(dev, "r");
-	if (!devfd)
+	if (!devfd) {
+		eprintf("%s open failed errno: %d\n", dev, errno);
 		return -1;
-	fscanf(devfd, "%s:", majorno);
+	}
+	n = fscanf(devfd, "%d:", &majorno);
 	fclose(devfd);
-
-	return atoi(majorno);
+	if (n != 1) {
+		if (n < 0)
+			eprintf("reading major from %s failed errno: %d\n", dev, errno);
+		else
+			eprintf("reading major from %s failed: invalid input\n", dev);
+		return -1;
+	}
+	return majorno;
 }
 
 static int chk_sg_device(char *path)
@@ -400,7 +408,7 @@ static int init_sg_device(int fd)
 	return 0;
 }
 
-static int bs_sg_init(struct scsi_lu *lu)
+static tgtadm_err bs_sg_init(struct scsi_lu *lu)
 {
 	/*
 	 * Setup struct scsi_lu->cmd_perform() passthrough pointer
@@ -413,7 +421,7 @@ static int bs_sg_init(struct scsi_lu *lu)
 	 * usr/target.c:__cmd_done_passthrough().
 	 */
 	lu->cmd_done = &__cmd_done_passthrough;
-	return 0;
+	return TGTADM_SUCCESS;
 }
 
 static int bs_sg_open(struct scsi_lu *lu, char *path, int *fd, uint64_t *size)
@@ -461,12 +469,12 @@ static void bs_sg_close(struct scsi_lu *lu)
 	close(lu->fd);
 }
 
-static int bs_sg_lu_init(struct scsi_lu *lu)
+static tgtadm_err bs_sg_lu_init(struct scsi_lu *lu)
 {
 	if (spc_lu_init(lu))
 		return TGTADM_NOMEM;
 
-	return 0;
+	return TGTADM_SUCCESS;
 }
 
 static struct backingstore_template sg_bst = {

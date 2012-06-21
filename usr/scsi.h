@@ -40,12 +40,12 @@
 #define SEEK_10               0x2b
 #define POSITION_TO_ELEMENT   0x2b
 #define WRITE_VERIFY          0x2e
-#define VERIFY                0x2f
+#define VERIFY_10             0x2f
 #define SEARCH_HIGH           0x30
 #define SEARCH_EQUAL          0x31
 #define SEARCH_LOW            0x32
 #define SET_LIMITS            0x33
-#define PRE_FETCH             0x34
+#define PRE_FETCH_10          0x34
 #define READ_POSITION         0x34
 #define SYNCHRONIZE_CACHE     0x35
 #define LOCK_UNLOCK_CACHE     0x36
@@ -75,10 +75,12 @@
 #define WRITE_16              0x8a
 #define WRITE_VERIFY_16       0x8e
 #define VERIFY_16	      0x8f
+#define PRE_FETCH_16          0x90
 #define SYNCHRONIZE_CACHE_16  0x91
 #define WRITE_SAME_16	      0x93
 #define SERVICE_ACTION_IN     0x9e
 #define	SAI_READ_CAPACITY_16  0x10
+#define	SAI_GET_LBA_STATUS    0x12
 #define REPORT_LUNS           0xa0
 #define MOVE_MEDIUM           0xa5
 #define EXCHANGE_MEDIUM       0xa6
@@ -230,6 +232,9 @@
 /* Data Protect */
 #define ASC_WRITE_PROTECT			0x2700
 #define ASC_MEDIUM_OVERWRITE_ATTEMPTED		0x300c
+
+/* Miscompare */
+#define ASC_MISCOMPARE_DURING_VERIFY_OPERATION  0x1d00
 
 
 /* PERSISTENT_RESERVE_IN service action codes */

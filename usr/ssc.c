@@ -51,6 +51,36 @@ static int ssc_mode_page_update(struct scsi_cmd *cmd, uint8_t *data,
 	return 1;
 }
 
+static int ssc_mode_sense(int host_no, struct scsi_cmd *cmd)
+{
+	int ret;
+	uint8_t *data, mode6;
+
+	ret = spc_mode_sense(host_no, cmd);
+	if (ret != SAM_STAT_GOOD)
+		return ret;
+
+	mode6 = (cmd->scb[0] == 0x1a);
+	data = scsi_get_in_buffer(cmd);
+
+	/* set write protect bit to 1 for readonly devices */
+	if (cmd->dev->attrs.readonly) {
+		if (mode6)
+			data[2] |= 0x80;
+		else
+			data[3] |= 0x80;
+	}
+
+	/* set the device to report BUFFERED MODE for writes */
+	if (mode6)
+		data[2] |= 0x10;
+	else
+		data[3] |= 0x10;
+
+
+	return ret;
+}
+
 static int ssc_mode_select(int host_no, struct scsi_cmd *cmd)
 {
 	return spc_mode_select(host_no, cmd, ssc_mode_page_update);
@@ -66,6 +96,25 @@ static int ssc_rw(int host_no, struct scsi_cmd *cmd)
 	if (ret)
 		return SAM_STAT_RESERVATION_CONFLICT;
 
+	if (cmd->dev->attrs.removable && !cmd->dev->attrs.online) {
+		key = NOT_READY;
+		asc = ASC_MEDIUM_NOT_PRESENT;
+		goto sense;
+	}
+
+	if (cmd->dev->attrs.readonly) {
+		switch (cmd->scb[0]) {
+		case ERASE:
+		case SPACE:
+		case WRITE_6:
+		case WRITE_FILEMARKS:
+			key = DATA_PROTECT;
+			asc = ASC_WRITE_PROTECT;
+			goto sense;
+			break;
+		}
+	}
+
 	ret = cmd->dev->bst->bs_cmd_submit(cmd);
 	if (ret) {
 		key = HARDWARE_ERROR;
@@ -73,6 +122,7 @@ static int ssc_rw(int host_no, struct scsi_cmd *cmd)
 	} else
 		return SAM_STAT_GOOD;
 
+sense:
 	cmd->offset = 0;
 	scsi_set_in_resid_by_actual(cmd, 0);
 	scsi_set_out_resid_by_actual(cmd, 0);
@@ -105,16 +155,15 @@ static int ssc_read_block_limit(int host_no, struct scsi_cmd *cmd)
 	return SAM_STAT_GOOD;
 }
 
-static int ssc_lu_init(struct scsi_lu *lu)
+static tgtadm_err ssc_lu_init(struct scsi_lu *lu)
 {
 	uint8_t *data;
 	struct ssc_info *ssc;
 
 	ssc = zalloc(sizeof(struct ssc_info));
-	if (ssc)
-		dtype_priv(lu) = ssc;
-	else
+	if (!ssc)
 		return TGTADM_NOMEM;
+	dtype_priv(lu) = ssc;
 
 	if (spc_lu_init(lu))
 		return TGTADM_NOMEM;
@@ -154,7 +203,7 @@ static int ssc_lu_init(struct scsi_lu *lu)
 	/* Medium Configuration - Mandatory - SSC3 8.3.7 */
 	add_mode_page(lu, "0x1d:0:0x1e:1:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0"
 				":0:0:0:0:0:0:0:0:0:0:0:0:0");
-	return 0;
+	return TGTADM_SUCCESS;
 }
 
 static struct device_type_template ssc_template = {
@@ -196,10 +245,10 @@ static struct device_type_template ssc_template = {
 
 		{spc_illegal_op,},
 		{spc_illegal_op,},
-		{spc_mode_sense,},
+		{ssc_mode_sense,},
 		{spc_start_stop,},
 		{spc_illegal_op,},
-		{spc_illegal_op,},
+		{spc_send_diagnostics,},
 		{spc_prevent_allow_media_removal,},
 		{spc_illegal_op,},
 
@@ -255,7 +304,7 @@ static struct device_type_template ssc_template = {
 
 		{spc_illegal_op,},
 		{spc_illegal_op,},
-		{spc_mode_sense,},
+		{ssc_mode_sense,},
 		{spc_illegal_op,},
 		{spc_illegal_op,},
 		{spc_illegal_op,},

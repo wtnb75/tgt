@@ -32,6 +32,8 @@
 #include <sys/epoll.h>
 #include <infiniband/verbs.h>
 #include <rdma/rdma_cma.h>
+#include <sys/ipc.h>
+#include <sys/shm.h>
 
 #include "util.h"
 #include "iscsid.h"
@@ -80,7 +82,9 @@ char *iser_portal_addr;
 
 #define MAX_POLL_WC 32
 
+#define DEFAULT_POOL_SIZE_MB    1024
 #define ISER_MAX_QUEUE_CMD      128     /* iSCSI cmd window size */
+#define MAX_CQ_ENTRIES          (128 * 1024)
 
 #define MASK_BY_BIT(b)  	((1UL << b) - 1)
 #define ALIGN_TO_BIT(x, b)      ((((unsigned long)x) + MASK_BY_BIT(b)) & \
@@ -92,13 +96,9 @@ struct iscsi_sense_data {
 	uint8_t data[0];
 } __packed;
 
-/*
- * Number of allocatable data buffers, each of this size.  Do at least 128
- * for linux iser.  The membuf size is rounded up at initialization time
- * to the hardware page size so that allocations for direct IO devices are
- * aligned.
- */
-static int membuf_num = 16 * ISER_MAX_QUEUE_CMD;
+static size_t buf_pool_sz_mb = DEFAULT_POOL_SIZE_MB;
+
+static int membuf_num;
 static size_t membuf_size = RDMA_TRANSFER_SIZE;
 
 static int iser_conn_get(struct iser_conn *conn);
@@ -559,16 +559,70 @@ static inline void iser_set_rsp_stat_sn(struct iscsi_session *session,
 	}
 }
 
+static uint8_t* iser_alloc_pool(size_t pool_size, int *shmid)
+{
+	int shmemid;
+	uint8_t *buf;
+
+	/* allocate memory */
+	shmemid = shmget(IPC_PRIVATE, pool_size,
+			SHM_HUGETLB | IPC_CREAT | SHM_R | SHM_W);
+
+	if (shmemid < 0) {
+		eprintf("shmget rdma pool sz:%zu failed\n", pool_size);
+		goto failed_huge_page;
+	}
+
+	/* get pointer to allocated memory */
+	buf = shmat(shmemid, NULL, 0);
+
+	if (buf == (void*)-1) {
+		eprintf("Shared memory attach failure (errno=%d %m)", errno);
+		shmctl(shmemid, IPC_RMID, NULL);
+		goto failed_huge_page;
+	}
+
+	/* mark 'to be destroyed' when process detaches from shmem segment
+	   this will clear the HugePage resources even if process if killed not nicely.
+	   From checking shmctl man page it is unlikely that it will fail here. */
+	if (shmctl(shmemid, IPC_RMID, NULL)) {
+		eprintf("Shared memory contrl mark 'to be destroyed' failed (errno=%d %m)", errno);
+	}
+
+	dprintf("Allocated huge page sz:%zu\n", pool_size);
+	*shmid = shmemid;
+	return buf;
+
+ failed_huge_page:
+	*shmid = -1;
+	return valloc(pool_size);
+}
+
+static void iser_free_pool(uint8_t *pool_buf, int shmid) {
+	if (shmid >= 0) {
+		if (shmdt(pool_buf) != 0) {
+			eprintf("shmem detach failure (errno=%d %m)", errno);
+		}
+	} else {
+		free(pool_buf);
+	}
+}
+
 static int iser_init_rdma_buf_pool(struct iser_device *dev)
 {
 	uint8_t *pool_buf, *list_buf;
 	size_t pool_size, list_size;
 	struct iser_membuf *rdma_buf;
+	int shmid;
 	int i;
 
+	/* The membuf size is rounded up at initialization time to the hardware
+	   page size so that allocations for direct IO devices are aligned. */
 	membuf_size = roundup(membuf_size, pagesize);
-	pool_size = membuf_num * membuf_size;
-	pool_buf = valloc(pool_size);
+	pool_size = buf_pool_sz_mb * 1024 * 1024;
+	membuf_num = pool_size / membuf_size;
+	pool_size = membuf_num * membuf_size; /* reflect possible round-down */
+	pool_buf = iser_alloc_pool(pool_size, &shmid);
 	if (!pool_buf) {
 		eprintf("malloc rdma pool sz:%zu failed\n", pool_size);
 		return -ENOMEM;
@@ -578,7 +632,7 @@ static int iser_init_rdma_buf_pool(struct iser_device *dev)
 	list_buf = malloc(list_size);
 	if (!list_buf) {
 		eprintf("malloc list_buf sz:%zu failed\n", list_size);
-		free(pool_buf);
+		iser_free_pool(pool_buf, shmid);
 		return -ENOMEM;
 	}
 
@@ -587,13 +641,14 @@ static int iser_init_rdma_buf_pool(struct iser_device *dev)
 				    IBV_ACCESS_LOCAL_WRITE);
 	if (!dev->membuf_mr) {
 		eprintf("ibv_reg_mr failed, %m\n");
-		free(pool_buf);
+		iser_free_pool(pool_buf, shmid);
 		free(list_buf);
 		return -1;
 	}
 	dprintf("pool buf:%p list:%p mr:%p lkey:0x%x\n",
 		pool_buf, list_buf, dev->membuf_mr, dev->membuf_mr->lkey);
 
+	dev->rdma_hugetbl_shmid = shmid;
 	dev->membuf_regbuf = pool_buf;
 	dev->membuf_listbuf = list_buf;
 	INIT_LIST_HEAD(&dev->membuf_free);
@@ -1044,14 +1099,16 @@ static void iser_free_ff_resources(struct iser_conn *conn)
 int iser_login_complete(struct iscsi_connection *iscsi_conn)
 {
 	struct iser_conn *conn = ISER_CONN(iscsi_conn);
-	unsigned int irdsl, trdsl, outst_pdu, hdrsz;
+	unsigned int trdsl;
+	/* unsigned int irdsl; */
+	unsigned int outst_pdu, hdrsz;
 	int err = -1;
 
 	dprintf("entry\n");
 
 	/* one more send, then done; login resources are left until then */
 	iser_conn_login_phase_set(conn, LOGIN_PHASE_LAST_SEND);
-	irdsl = iscsi_conn->session_param[ISCSI_PARAM_INITIATOR_RDSL].val;
+	/* irdsl = iscsi_conn->session_param[ISCSI_PARAM_INITIATOR_RDSL].val; */
 	trdsl = iscsi_conn->session_param[ISCSI_PARAM_TARGET_RDSL].val;
 
 	/* ToDo: outstanding pdus num */
@@ -3210,7 +3267,7 @@ static int iser_device_init(struct iser_device *dev)
 		eprintf("ibv_query_device failed, %m\n");
 		goto out;
 	}
-	cqe_num = dev->device_attr.max_cqe;
+	cqe_num = min(dev->device_attr.max_cqe, MAX_CQ_ENTRIES);
 	dprintf("max %d CQEs\n", cqe_num);
 
 	err = -1;
@@ -3386,6 +3443,7 @@ static const char *lld_param_port = "port";
 static const char *lld_param_nop = "nop";
 static const char *lld_param_on = "on";
 static const char *lld_param_off = "off";
+static const char *lld_param_pool_sz_mb = "pool_sz_mb";
 
 static int iser_param_parser(char *p)
 {
@@ -3418,6 +3476,12 @@ static int iser_param_parser(char *p)
 				err = -EINVAL;
 				break;
 			}
+		} else if (!strncmp(p, lld_param_pool_sz_mb,
+				    strlen(lld_param_pool_sz_mb))) {
+			q = p + strlen(lld_param_pool_sz_mb) + 1;
+			buf_pool_sz_mb = atoi(q);
+			if (buf_pool_sz_mb < 128)
+				buf_pool_sz_mb = 128;
 		} else {
 			dprintf("unsupported param:%s\n", p);
 			err = -EINVAL;

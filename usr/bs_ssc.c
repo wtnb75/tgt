@@ -189,8 +189,6 @@ static int append_blk(struct scsi_cmd *cmd, uint8_t *data,
 	}
 	/* Write new EOD blk header */
 
-	fsync(fd);
-
 	return SAM_STAT_GOOD;
 }
 
@@ -465,6 +463,7 @@ static void tape_rdwr_request(struct scsi_cmd *cmd)
 			append_blk(cmd, scsi_get_out_buffer(cmd), 0,
 					0, BLK_FILEMARK);
 
+		fsync(cmd->dev->fd);
 		break;
 
 	case READ_6:
@@ -569,7 +568,7 @@ static void tape_rdwr_request(struct scsi_cmd *cmd)
 		int len = scsi_get_in_length(cmd);
 
 		dprintf("Size of in_buffer = %d\n", len);
-		dprintf("Sizeof(buf): %Zd\n", sizeof(buf));
+		dprintf("Sizeof(buf): %zd\n", sizeof(buf));
 		dprintf("service action: 0x%02x\n", service_action);
 
 		if (service_action == 0) {	/* Short form - block ID */
@@ -604,7 +603,7 @@ static void tape_rdwr_request(struct scsi_cmd *cmd)
 			cmd, cmd->scb[0], ret, length, cmd->offset);
 }
 
-static int bs_ssc_init(struct scsi_lu *lu)
+static tgtadm_err bs_ssc_init(struct scsi_lu *lu)
 {
 	struct bs_thread_info *info = BS_THREAD_I(lu);
 	return bs_thread_open(info, tape_rdwr_request, 1);
@@ -620,7 +619,7 @@ static int bs_ssc_open(struct scsi_lu *lu, char *path, int *fd, uint64_t *size)
 
 	ssc = dtype_priv(lu);
 
-	*fd = backed_file_open(path, O_RDWR | O_LARGEFILE, size);
+	*fd = backed_file_open(path, O_RDWR | O_LARGEFILE, size, NULL);
 	if (*fd < 0) {
 		eprintf("Could not open %s %m\n", path);
 		return *fd;

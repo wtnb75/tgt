@@ -520,6 +520,7 @@ int main(int argc, char **argv)
 {
 	struct sigaction sa_old;
 	struct sigaction sa_new;
+	char *spare_args;
 	int err, ch, longindex, nr_lld = 0;
 	int is_daemon = 1, is_debug = 0;
 	int ret;
@@ -590,7 +591,9 @@ int main(int argc, char **argv)
 	}
 #endif
 
-	nr_lld = lld_init(argv[optind]);
+	spare_args = optind < argc ? argv[optind] : NULL;
+
+	nr_lld = lld_init(spare_args);
 	if (!nr_lld) {
 		fprintf(stderr, "No available low level driver!\n");
 		exit(1);

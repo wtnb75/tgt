@@ -3,6 +3,9 @@
 
 #include "log.h"
 #include "scsi_cmnd.h"
+#include "tgtadm_error.h"
+
+struct concat_buf;
 
 #define SCSI_ID_LEN		36
 #define SCSI_SN_LEN		36
@@ -11,6 +14,7 @@
 #define PRODUCT_ID_LEN		16
 #define PRODUCT_REV_LEN		4
 #define BLOCK_LIMITS_VPD_LEN	0x3C
+#define LBP_VPD_LEN		4
 
 #define PCODE_SHIFT		7
 #define PCODE_OFFSET(x) (x & ((1 << PCODE_SHIFT) - 1))
@@ -51,6 +55,10 @@ struct vpd {
 	uint8_t data[0];
 };
 
+#define PREVENT_REMOVAL			0x01
+#define PREVENT_REMOVAL_PERSISTENT	0x02
+#define PREVENT_MASK			0x03
+
 struct lu_phy_attr {
 	char scsi_id[SCSI_ID_LEN + 1];
 	char scsi_sn[SCSI_SN_LEN + 1];
@@ -65,10 +73,13 @@ struct lu_phy_attr {
 	char qualifier;		/* Peripheral Qualifier */
 	char removable;		/* Removable media */
 	char readonly;          /* Read-Only media */
+	char thinprovisioning;  /* Use thin-provisioning for this LUN */
 	char online;		/* Logical Unit online */
 	char sense_format;	/* Descrptor format sense data supported */
 				/* For the following see READ CAPACITY (16) */
 	unsigned char lbppbe;	/* Logical blocks per physical block exponent */
+	char no_auto_lbppbe;    /* Do not update it automatically when the
+				   backing file changes */
 	uint16_t la_lba;	/* Lowest aligned LBA */
 
 	/* VPD pages 0x80 -> 0xff masked with 0x80*/
@@ -85,6 +96,7 @@ struct it_nexus_lu_info {
 	struct scsi_lu *lu;
 	struct list_head lu_info_siblings;
 	struct list_head pending_ua_sense_list;
+	int prevent; /* prevent removal on this itl nexus ? */
 };
 
 struct service_action {
@@ -108,11 +120,11 @@ struct device_type_operations {
 struct device_type_template {
 	unsigned char type;
 
-	int (*lu_init)(struct scsi_lu *lu);
+	tgtadm_err (*lu_init)(struct scsi_lu *lu);
 	void (*lu_exit)(struct scsi_lu *lu);
-	int (*lu_config)(struct scsi_lu *lu, char *args);
-	int (*lu_online)(struct scsi_lu *lu);
-	int (*lu_offline)(struct scsi_lu *lu);
+	tgtadm_err (*lu_config)(struct scsi_lu *lu, char *args);
+	tgtadm_err (*lu_online)(struct scsi_lu *lu);
+	tgtadm_err (*lu_offline)(struct scsi_lu *lu);
 	int (*cmd_passthrough)(int, struct scsi_cmd *);
 
 	struct device_type_operations ops[256];
@@ -125,7 +137,7 @@ struct backingstore_template {
 	int bs_datasize;
 	int (*bs_open)(struct scsi_lu *dev, char *path, int *fd, uint64_t *size);
 	void (*bs_close)(struct scsi_lu *dev);
-	int (*bs_init)(struct scsi_lu *dev);
+	tgtadm_err (*bs_init)(struct scsi_lu *dev);
 	void (*bs_exit)(struct scsi_lu *dev);
 	int (*bs_cmd_submit)(struct scsi_cmd *cmd);
 	int bs_oflags_supported;
@@ -219,28 +231,28 @@ extern struct list_head bst_list;
 
 extern int ipc_init(void);
 extern void ipc_exit(void);
-extern int tgt_device_create(int tid, int dev_type, uint64_t lun, char *args, int backing);
-extern int tgt_device_destroy(int tid, uint64_t lun, int force);
-extern int tgt_device_update(int tid, uint64_t dev_id, char *name);
+extern tgtadm_err tgt_device_create(int tid, int dev_type, uint64_t lun, char *args, int backing);
+extern tgtadm_err tgt_device_destroy(int tid, uint64_t lun, int force);
+extern tgtadm_err tgt_device_update(int tid, uint64_t dev_id, char *name);
 extern int device_reserve(struct scsi_cmd *cmd);
 extern int device_release(int tid, uint64_t itn_id, uint64_t lun, int force);
 extern int device_reserved(struct scsi_cmd *cmd);
-extern int tgt_device_path_update(struct target *target, struct scsi_lu *lu, char *path);
+extern tgtadm_err tgt_device_path_update(struct target *target, struct scsi_lu *lu, char *path);
 
-extern int tgt_target_create(int lld, int tid, char *args);
-extern int tgt_target_destroy(int lld, int tid, int force);
+extern tgtadm_err tgt_target_create(int lld, int tid, char *args);
+extern tgtadm_err tgt_target_destroy(int lld, int tid, int force);
 extern char *tgt_targetname(int tid);
-extern int tgt_target_show_all(char *buf, int rest);
-int system_set_state(char *str);
-int system_show(int mode, char *buf, int rest);
+extern tgtadm_err tgt_target_show_all(struct concat_buf *b);
+tgtadm_err system_set_state(char *str);
+tgtadm_err system_show(int mode, struct concat_buf *b);
 int is_system_available(void);
 int is_system_inactive(void);
 
-extern int tgt_portal_create(int lld, char *args);
-extern int tgt_portal_destroy(int lld, char *args);
+extern tgtadm_err tgt_portal_create(int lld, char *args);
+extern tgtadm_err tgt_portal_destroy(int lld, char *args);
 
-extern int tgt_bind_host_to_target(int tid, int host_no);
-extern int tgt_unbind_host_to_target(int tid, int host_no);
+extern tgtadm_err tgt_bind_host_to_target(int tid, int host_no);
+extern tgtadm_err tgt_unbind_host_to_target(int tid, int host_no);
 
 struct event_data;
 typedef void (*sched_event_handler_t)(struct event_data *tev);
@@ -280,6 +292,8 @@ extern void ua_sense_add_other_it_nexus(uint64_t itn_id, struct scsi_lu *lu,
 extern void ua_sense_add_it_nexus(uint64_t itn_id, struct scsi_lu *lu,
 					uint16_t asc);
 
+extern int lu_prevent_removal(struct scsi_lu *lu);
+
 extern uint64_t scsi_get_devid(int lid, uint8_t *pdu);
 extern int scsi_cmd_perform(int host_no, struct scsi_cmd *cmd);
 extern void sense_data_build(struct scsi_cmd *cmd, uint8_t key, uint16_t asc);
@@ -291,21 +305,21 @@ extern int get_scsi_cdb_size(struct scsi_cmd *cmd);
 extern int get_scsi_command_size(unsigned char op);
 
 extern enum scsi_target_state tgt_get_target_state(int tid);
-extern int tgt_set_target_state(int tid, char *str);
+extern tgtadm_err tgt_set_target_state(int tid, char *str);
 
-extern int acl_add(int tid, char *address);
-extern int acl_del(int tid, char *address);
+extern tgtadm_err acl_add(int tid, char *address);
+extern tgtadm_err acl_del(int tid, char *address);
 extern char *acl_get(int tid, int idx);
 
-extern int iqn_acl_add(int tid, char *name);
-extern int iqn_acl_del(int tid, char *name);
+extern tgtadm_err iqn_acl_add(int tid, char *name);
+extern tgtadm_err iqn_acl_del(int tid, char *name);
 extern char *iqn_acl_get(int tid, int idx);
 
 extern int account_lookup(int tid, int type, char *user, int ulen, char *password, int plen);
-extern int account_add(char *user, char *password);
-extern int account_del(char *user);
-extern int account_ctl(int tid, int type, char *user, int bind);
-extern int account_show(char *buf, int rest);
+extern tgtadm_err account_add(char *user, char *password);
+extern tgtadm_err account_del(char *user);
+extern tgtadm_err account_ctl(int tid, int type, char *user, int bind);
+extern tgtadm_err account_show(struct concat_buf *b);
 extern int account_available(int tid, int dir);
 
 extern int it_nexus_create(int tid, uint64_t itn_id, int host_no, char *info);
@@ -314,11 +328,12 @@ extern int it_nexus_destroy(int tid, uint64_t itn_id);
 extern int device_type_register(struct device_type_template *);
 
 extern struct lu_phy_attr *lu_attr_lookup(int tid, uint64_t lun);
-extern int dtd_load_unload(int tid, uint64_t lun, int load, char *file);
+extern tgtadm_err dtd_load_unload(int tid, uint64_t lun, int load, char *file);
+extern tgtadm_err dtd_check_removable(int tid, uint64_t lun);
 
 extern int register_backingstore_template(struct backingstore_template *bst);
 extern struct backingstore_template *get_backingstore_template(const char *name);
-extern int backingstore_show(char *buf, size_t rest);
+extern int backingstore_show(struct concat_buf *buf);
 extern int backingstore_new(char *buf, size_t sz);
 
 extern int setup_param(char *name, int (*parser)(char *));
@@ -344,4 +359,11 @@ struct event_data {
 int call_program(const char *cmd,
 		    void (*callback)(void *data, int result), void *data,
 		    char *output, int op_len, int flags);
+
+void update_lbppbe(struct scsi_lu *lu, int blksize);
+
+struct service_action *
+find_service_action(struct service_action *service_action,
+		    uint32_t action);
+
 #endif

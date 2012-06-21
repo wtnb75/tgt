@@ -284,7 +284,12 @@ static void iser_login_oper_scan(struct iscsi_connection *iscsi_conn,
 			}
 
 			err = param_check_val(session_keys, idx, &val);
-			err = param_set_val(session_keys, iscsi_conn->session_param, idx, &val);
+			if (err) {
+				iser_text_key_add_reject(iscsi_conn, tx_pdu, key);
+				continue;
+			}
+
+			param_set_val(session_keys, iscsi_conn->session_param, idx, &val);
 
 			switch (iscsi_conn->session_param[idx].state) {
 			case KEY_STATE_START:
@@ -434,7 +439,11 @@ static void iser_login_start(struct iscsi_connection *iscsi_conn,
 		return;
 	}
 	iscsi_conn->initiator = strdup(name);
+
 	alias = iser_text_key_find(req_data, req_datasize, "InitiatorAlias");
+	if (alias)
+		iscsi_conn->initiator_alias = strdup(alias);
+
 	session_type = iser_text_key_find(req_data, req_datasize, "SessionType");
 	target_name = iser_text_key_find(req_data, req_datasize, "TargetName");
 
@@ -854,4 +863,3 @@ int iser_text_exec(struct iscsi_connection *iscsi_conn,
 
 	return 0;
 }
-

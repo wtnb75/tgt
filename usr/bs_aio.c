@@ -206,6 +206,11 @@ static int bs_aio_cmd_submit(struct scsi_cmd *cmd)
 	case READ_16:
 		break;
 
+	case WRITE_SAME:
+	case WRITE_SAME_16:
+		eprintf("WRITE_SAME not yet supported for AIO backend.\n");
+		return -1;
+
 	case SYNCHRONIZE_CACHE:
 	case SYNCHRONIZE_CACHE_16:
 	default:
@@ -260,10 +265,13 @@ static void bs_aio_get_completions(int fd, int events, void *data)
 {
 	struct bs_aio_info *info = data;
 	int i, ret;
-	uint64_t ncomplete, nevents;
+	/* read from eventfd returns 8-byte int, fails with the error EINVAL
+	   if the size of the supplied buffer is less than 8 bytes */
+	uint64_t evts_complete;
+	unsigned int ncomplete, nevents;
 
 retry_read:
-	ret = read(info->evt_fd, &ncomplete, sizeof(ncomplete));
+	ret = read(info->evt_fd, &evts_complete, sizeof(evts_complete));
 	if (unlikely(ret < 0)) {
 		eprintf("failed to read AIO completions, %m\n");
 		if (errno == EAGAIN || errno == EINTR)
@@ -271,9 +279,10 @@ retry_read:
 
 		return;
 	}
+	ncomplete = (unsigned int) evts_complete;
 
 	while (ncomplete) {
-		nevents = min_t(long, ncomplete, ARRAY_SIZE(info->io_evts));
+		nevents = min_t(unsigned int, ncomplete, ARRAY_SIZE(info->io_evts));
 retry_getevts:
 		ret = io_getevents(info->ctx, 1, nevents, info->io_evts, NULL);
 		if (likely(ret > 0)) {
@@ -285,7 +294,7 @@ retry_getevts:
 			eprintf("io_getevents failed, err:%d\n", -ret);
 			return;
 		}
-		dprintf("got %ld ioevents out of %ld, pending %d\n",
+		dprintf("got %d ioevents out of %d, pending %d\n",
 			nevents, ncomplete, info->npending);
 
 		for (i = 0; i < nevents; i++)
@@ -304,6 +313,7 @@ static int bs_aio_open(struct scsi_lu *lu, char *path, int *fd, uint64_t *size)
 {
 	struct bs_aio_info *info = BS_AIO_I(lu);
 	int ret, afd;
+	uint32_t blksize = 0;
 
 	info->iodepth = AIO_MAX_IODEPTH;
 	eprintf("create aio context for tgt:%d lun:%"PRId64 ", max iodepth:%d\n",
@@ -331,13 +341,14 @@ static int bs_aio_open(struct scsi_lu *lu, char *path, int *fd, uint64_t *size)
 
 	eprintf("open %s, RW, O_DIRECT for tgt:%d lun:%"PRId64 "\n",
 		path, info->lu->tgt->tid, info->lu->lun);
-	*fd = backed_file_open(path, O_RDWR|O_LARGEFILE|O_DIRECT, size);
+	*fd = backed_file_open(path, O_RDWR|O_LARGEFILE|O_DIRECT, size,
+				&blksize);
 	/* If we get access denied, try opening the file in readonly mode */
 	if (*fd == -1 && (errno == EACCES || errno == EROFS)) {
 		eprintf("open %s, READONLY, O_DIRECT for tgt:%d lun:%"PRId64 "\n",
 			path, info->lu->tgt->tid, info->lu->lun);
 		*fd = backed_file_open(path, O_RDONLY|O_LARGEFILE|O_DIRECT,
-				       size);
+				       size, &blksize);
 		lu->attrs.readonly = 1;
 	}
 	if (*fd < 0) {
@@ -346,11 +357,14 @@ static int bs_aio_open(struct scsi_lu *lu, char *path, int *fd, uint64_t *size)
 		ret = *fd;
 		goto remove_tgt_evt;
 	}
-	else {
-		eprintf("%s opened successfully for tgt:%d lun:%"PRId64 "\n",
-			path, info->lu->tgt->tid, info->lu->lun);
-		return 0;
-	}
+
+	eprintf("%s opened successfully for tgt:%d lun:%"PRId64 "\n",
+		path, info->lu->tgt->tid, info->lu->lun);
+
+	if (!lu->attrs.no_auto_lbppbe)
+		update_lbppbe(lu, blksize);
+
+	return 0;
 
 remove_tgt_evt:
 	tgt_event_del(afd);
@@ -366,7 +380,7 @@ static void bs_aio_close(struct scsi_lu *lu)
 	close(lu->fd);
 }
 
-static int bs_aio_init(struct scsi_lu *lu)
+static tgtadm_err bs_aio_init(struct scsi_lu *lu)
 {
 	struct bs_aio_info *info = BS_AIO_I(lu);
 	int i;
@@ -379,7 +393,7 @@ static int bs_aio_init(struct scsi_lu *lu)
 	for (i=0; i < ARRAY_SIZE(info->iocb_arr); i++)
 		info->piocb_arr[i] = &info->iocb_arr[i];
 
-	return 0;
+	return TGTADM_SUCCESS;
 }
 
 static void bs_aio_exit(struct scsi_lu *lu)

@@ -2193,14 +2193,14 @@ static int mmc_mode_sense(int host_no, struct scsi_cmd *cmd)
 	return spc_mode_sense(host_no, cmd);
 }
 
-static int mmc_lu_init(struct scsi_lu *lu)
+static tgtadm_err mmc_lu_init(struct scsi_lu *lu)
 {
 	struct backingstore_template *bst;
 	struct mmc_info *mmc;
 
 	mmc = zalloc(sizeof(struct mmc_info));
 	if (!mmc)
-		return -ENOMEM;
+		return TGTADM_NOMEM;
 
 	lu->xxc_p = mmc;
 
@@ -2265,10 +2265,10 @@ static int mmc_lu_init(struct scsi_lu *lu)
 			  "0x10:0:0x96:0:0:0:0:0:0:0:0:0:0:0:0:0:0:"
 			  "0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:"
 			  "0:0");
-	return 0;
+	return TGTADM_SUCCESS;
 }
 
-static int mmc_lu_online(struct scsi_lu *lu)
+static tgtadm_err mmc_lu_online(struct scsi_lu *lu)
 {
 	struct mmc_info *mmc = dtype_priv(lu);
 	struct stat st;
@@ -2291,13 +2291,7 @@ static int mmc_lu_online(struct scsi_lu *lu)
 			mmc->current_profile = PROFILE_DVD_ROM;
 	}
 
-	return 0;
-}
-
-static int mmc_lu_offline(struct scsi_lu *lu)
-{
-	lu->attrs.online = 0;
-	return 0;
+	return TGTADM_SUCCESS;
 }
 
 static struct device_type_template mmc_template = {
@@ -2305,7 +2299,7 @@ static struct device_type_template mmc_template = {
 	.lu_init	= mmc_lu_init,
 	.lu_config	= spc_lu_config,
 	.lu_online	= mmc_lu_online,
-	.lu_offline	= mmc_lu_offline,
+	.lu_offline	= spc_lu_offline,
 	.lu_exit	= spc_lu_exit,
 	.ops		= {
 		{spc_test_unit,},
@@ -2342,7 +2336,7 @@ static struct device_type_template mmc_template = {
 		{spc_start_stop,},
 		{spc_illegal_op,},
 		{spc_illegal_op,},
-		{spc_start_stop,}, /* allow medium removal */
+		{spc_prevent_allow_media_removal,},
 		{spc_illegal_op,},
 
 		/* 0x20 */

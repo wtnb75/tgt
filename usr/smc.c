@@ -5,6 +5,7 @@
  * (C) 2004-2007 FUJITA Tomonori <tomof@acm.org>
  * (C) 2005-2007 Mike Christie <michaelc@cs.wisc.edu>
  * (C) 2007      Mark Harvey <markh794@gmail.com>
+ * (C) 2012      Ronnie Sahlberg <ronniesahlberg@gmail.com>
  *
  * SCSI target emulation code is based on Ardis's iSCSI implementation.
  *   http://www.ardistech.com/iscsi/
@@ -46,6 +47,12 @@
 #include "parser.h"
 #include "smc.h"
 #include "media.h"
+
+static int check_slot_removable(struct slot *s)
+{
+	tgtadm_err adm_err = dtd_check_removable(s->drive_tid, s->drive_lun);
+	return (adm_err == TGTADM_SUCCESS ? 0 : -EINVAL);
+}
 
 static int set_slot_full(struct slot *s, uint16_t src, char *path)
 {
@@ -443,6 +450,14 @@ static int smc_move_medium(int host_no, struct scsi_cmd *cmd)
 	if (invert && (s->sides == 1))	/* Use default INVALID FIELD IN CDB */
 		goto sense;
 
+	if (src_slot->element_type == ELEMENT_DATA_TRANSFER) {
+		if (check_slot_removable(src_slot)) {
+			key = ILLEGAL_REQUEST;
+			asc = ASC_MEDIUM_REMOVAL_PREVENTED;
+			goto sense;
+		}
+	}
+
 	memcpy(&dest_slot->barcode, &src_slot->barcode, sizeof(s->barcode));
 	if (dest_slot->element_type == ELEMENT_DATA_TRANSFER) {
 		char path[128];
@@ -476,15 +491,16 @@ sense:
 	return SAM_STAT_CHECK_CONDITION;
 }
 
-static int smc_lu_init(struct scsi_lu *lu)
+static tgtadm_err smc_lu_init(struct scsi_lu *lu)
 {
 	struct smc_info *smc;
+	tgtadm_err adm_err;
 
 	smc = zalloc(sizeof(struct smc_info));
 	if (smc)
 		dtype_priv(lu) = smc;
 	else
-		return -ENOMEM;
+		return TGTADM_NOMEM;
 
 	if (spc_lu_init(lu))
 		return TGTADM_NOMEM;
@@ -512,10 +528,10 @@ static int smc_lu_init(struct scsi_lu *lu)
 
 	INIT_LIST_HEAD(&smc->slots);
 
-	lu->dev_type_template.lu_online(lu); /* Library will now report as Online */
+	adm_err = lu->dev_type_template.lu_online(lu); /* Library will now report as Online */
 	lu->attrs.removable = 1; /* Default to removable media */
 
-	return 0;
+	return adm_err;
 }
 
 static void smc_lu_exit(struct scsi_lu *lu)
@@ -527,7 +543,7 @@ static void smc_lu_exit(struct scsi_lu *lu)
 	free(smc);
 }
 
-static int slot_insert(struct list_head *head, int element_type, int address)
+static tgtadm_err slot_insert(struct list_head *head, int element_type, int address)
 {
 	struct slot *s;
 
@@ -543,7 +559,13 @@ static int slot_insert(struct list_head *head, int element_type, int address)
 
 	list_add_tail(&s->slot_siblings, head);
 
-	return 0;
+	return TGTADM_SUCCESS;
+}
+
+static void slot_remove(struct slot *s)
+{
+	list_del(&s->slot_siblings);
+	free(s);
 }
 
 /**
@@ -592,10 +614,10 @@ static void slot_dump(struct list_head *head)
 		}
 }
 
-static int add_slt(struct scsi_lu *lu, struct tmp_param *tmp)
+static tgtadm_err add_slt(struct scsi_lu *lu, struct tmp_param *tmp)
 {
 	struct smc_info *smc = dtype_priv(lu);
-	int ret = TGTADM_INVALID_REQUEST;
+	tgtadm_err adm_err = TGTADM_INVALID_REQUEST;
 	struct mode_pg *pg;
 	struct slot *s;
 	uint16_t *element;
@@ -641,22 +663,31 @@ static int add_slt(struct scsi_lu *lu, struct tmp_param *tmp)
 		if (s)	// Opps... Found a slot at this address..
 			goto dont_do_slots;
 
-		ret = TGTADM_SUCCESS;
-		for(i = tmp->start_addr; i < (tmp->start_addr + tmp->quantity); i++)
-			if (slot_insert(&smc->slots, tmp->element_type, i))
-				ret = TGTADM_INVALID_REQUEST;
+		adm_err = TGTADM_SUCCESS;
+		for (i = tmp->start_addr; i < (tmp->start_addr + tmp->quantity); i++) {
+			adm_err = slot_insert(&smc->slots, tmp->element_type, i);
+			if (adm_err != TGTADM_SUCCESS) {
+				int j;
+				/* remove all slots added before error */
+				for (j = tmp->start_addr; j < i; j++) {
+					s = slot_lookup(&smc->slots, tmp->element_type, j);
+					slot_remove(s);
+				}
+				break;
+			}
+		}
 	}
 
 dont_do_slots:
-	return ret;
+	return adm_err;
 }
 
-static int config_slot(struct scsi_lu *lu, struct tmp_param *tmp)
+static tgtadm_err config_slot(struct scsi_lu *lu, struct tmp_param *tmp)
 {
 	struct smc_info *smc = dtype_priv(lu);
 	struct mode_pg *m = NULL;
 	struct slot *s = NULL;
-	int ret = TGTADM_INVALID_REQUEST;
+	int adm_err = TGTADM_INVALID_REQUEST;
 
 	switch(tmp->element_type) {
 	case ELEMENT_MEDIUM_TRANSPORT:
@@ -664,7 +695,7 @@ static int config_slot(struct scsi_lu *lu, struct tmp_param *tmp)
 		m = lu->mode_pgs[0x1e];
 		if (m) {
 			m->mode_data[0] = (tmp->sides > 1) ? 1 : 0;
-			ret = TGTADM_SUCCESS;
+			adm_err = TGTADM_SUCCESS;
 		}
 		break;
 	case ELEMENT_STORAGE:
@@ -672,9 +703,14 @@ static int config_slot(struct scsi_lu *lu, struct tmp_param *tmp)
 		s = slot_lookup(&smc->slots, tmp->element_type, tmp->address);
 		if (!s)
 			break;	// Slot not found..
+		if (tmp->clear_slot) {
+			set_slot_empty(s);
+			adm_err = TGTADM_SUCCESS;
+			break;
+		}
 		strncpy(s->barcode, tmp->barcode, sizeof(s->barcode));
 		set_slot_full(s, 0, NULL);
-		ret = TGTADM_SUCCESS;
+		adm_err = TGTADM_SUCCESS;
 		break;
 	case ELEMENT_DATA_TRANSFER:
 		if (!tmp->tid)
@@ -685,23 +721,23 @@ static int config_slot(struct scsi_lu *lu, struct tmp_param *tmp)
 		s->asc  = NO_ADDITIONAL_SENSE;
 		s->drive_tid = tmp->tid;
 		s->drive_lun = tmp->lun;
-		ret = TGTADM_SUCCESS;
+		adm_err = TGTADM_SUCCESS;
 		break;
 	}
-	return ret;
+	return adm_err;
 }
 
 #define ADD	1
 #define CONFIGURE 2
 
-static int __smc_lu_config(struct scsi_lu *lu, char *params)
+static tgtadm_err __smc_lu_config(struct scsi_lu *lu, char *params)
 {
 	struct smc_info *smc = dtype_priv(lu);
-	int err = TGTADM_SUCCESS;
+	tgtadm_err adm_err = TGTADM_SUCCESS;
 	char *p;
 	char buf[256];
 
-	while ((p = strsep(&params, ",")) != NULL) {
+	while (adm_err == TGTADM_SUCCESS && (p = strsep(&params, ",")) != NULL) {
 		substring_t args[MAX_OPT_ARGS];
 		int token;
 		if (!*p)
@@ -724,6 +760,10 @@ static int __smc_lu_config(struct scsi_lu *lu, char *params)
 		case Opt_sides:
 			match_strncpy(buf, &args[0], sizeof(buf));
 			sv_param.sides = atoi(buf);
+			break;
+		case Opt_clear_slot:
+			match_strncpy(buf, &args[0], sizeof(buf));
+			sv_param.clear_slot = atoi(buf);
 			break;
 		case Opt_address:
 			match_strncpy(buf, &args[0], sizeof(buf));
@@ -751,33 +791,35 @@ static int __smc_lu_config(struct scsi_lu *lu, char *params)
 			match_strncpy(buf, &args[0], sizeof(buf));
 			smc->media_home = strdup(buf);
 			if (!smc->media_home)
-				return TGTADM_NOMEM;
+				adm_err = TGTADM_NOMEM;
 			break;
 		default:
-			err = TGTADM_UNKNOWN_PARAM;
+			adm_err = TGTADM_UNKNOWN_PARAM;
+			break;
 		}
 	}
-	return err;
+	return adm_err;
 }
 
-static int smc_lu_config(struct scsi_lu *lu, char *params)
+static tgtadm_err smc_lu_config(struct scsi_lu *lu, char *params)
 {
-	int ret = TGTADM_SUCCESS;
+	tgtadm_err adm_err = TGTADM_SUCCESS;
 
 	memset(&sv_param, 0, sizeof(struct tmp_param));
 
-	if ((ret = lu_config(lu, params, __smc_lu_config)))
-		return TGTADM_UNKNOWN_PARAM;
+	adm_err = lu_config(lu, params, __smc_lu_config);
+	if (adm_err != TGTADM_SUCCESS)
+		return adm_err;
 
 	switch(sv_param.operation) {
 		case ADD:
-			ret = add_slt(lu, &sv_param);
+			adm_err = add_slt(lu, &sv_param);
 			break;
 		case CONFIGURE:
-			ret = config_slot(lu, &sv_param);
+			adm_err = config_slot(lu, &sv_param);
 			break;
 	}
-	return ret;
+	return adm_err;
 }
 
 struct device_type_template smc_template = {

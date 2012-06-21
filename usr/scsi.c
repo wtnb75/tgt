@@ -43,6 +43,8 @@ static unsigned char scsi_command_size[8] = {6, 10, 10, 12, 16, 12, 10, 10};
 #define COMMAND_SIZE(opcode) scsi_command_size[((opcode) >> 5) & 7]
 #define CDB_SIZE(cmd) (((((cmd)->scb[0] >> 5) & 7) < 6) ? \
 				COMMAND_SIZE((cmd)->scb[0]) : (cmd)->scb_len)
+#define CDB_CONTROL(cmd) (((cmd)->scb[0] == 0x7f) ? (cmd)->scb[1] \
+			  : (cmd)->scb[CDB_SIZE((cmd))-1])
 
 int get_scsi_command_size(unsigned char op)
 {
@@ -115,9 +117,11 @@ uint64_t scsi_rw_offset(uint8_t *scb)
 		off = ((scb[1] & 0x1f) << 16) + (scb[2] << 8) + scb[3];
 		break;
 	case READ_10:
+	case PRE_FETCH_10:
 	case WRITE_10:
-	case VERIFY:
+	case VERIFY_10:
 	case WRITE_VERIFY:
+	case WRITE_SAME:
 	case SYNCHRONIZE_CACHE:
 	case READ_12:
 	case WRITE_12:
@@ -127,11 +131,12 @@ uint64_t scsi_rw_offset(uint8_t *scb)
 			(uint32_t)scb[4] << 8 | (uint32_t)scb[5];
 		break;
 	case READ_16:
+	case PRE_FETCH_16:
 	case WRITE_16:
 	case VERIFY_16:
 	case WRITE_VERIFY_16:
-	case SYNCHRONIZE_CACHE_16:
 	case WRITE_SAME_16:
+	case SYNCHRONIZE_CACHE_16:
 		off = (uint64_t)scb[2] << 56 | (uint64_t)scb[3] << 48 |
 			(uint64_t)scb[4] << 40 | (uint64_t)scb[5] << 32 |
 			(uint64_t)scb[6] << 24 | (uint64_t)scb[7] << 16 |
@@ -157,9 +162,11 @@ uint32_t scsi_rw_count(uint8_t *scb)
 			cnt = 256;
 		break;
 	case READ_10:
+	case PRE_FETCH_10:
 	case WRITE_10:
-	case VERIFY:
+	case VERIFY_10:
 	case WRITE_VERIFY:
+	case WRITE_SAME:
 	case SYNCHRONIZE_CACHE:
 		cnt = (uint16_t)scb[7] << 8 | (uint16_t)scb[8];
 		break;
@@ -171,11 +178,12 @@ uint32_t scsi_rw_count(uint8_t *scb)
 			(uint32_t)scb[8] << 8 | (uint32_t)scb[9];
 		break;
 	case READ_16:
+	case PRE_FETCH_16:
 	case WRITE_16:
 	case VERIFY_16:
 	case WRITE_VERIFY_16:
-	case SYNCHRONIZE_CACHE_16:
 	case WRITE_SAME_16:
+	case SYNCHRONIZE_CACHE_16:
 		cnt = (uint32_t)scb[10] << 24 | (uint32_t)scb[11] << 16 |
 			(uint32_t)scb[12] << 8 | (uint32_t)scb[13];
 		break;
@@ -193,7 +201,7 @@ int scsi_cmd_perform(int host_no, struct scsi_cmd *cmd)
 	unsigned char op = cmd->scb[0];
 	struct it_nexus_lu_info *itn_lu;
 
-	if (cmd->scb[CDB_SIZE(cmd) - 1] & ((1U << 0) | (1U << 2))) {
+	if (CDB_CONTROL(cmd) & ((1U << 0) | (1U << 2))) {
 		/*
 		 * We don't support a linked command. SAM-3 say that
 		 * it's optional. It's obsolete in SAM-4.
@@ -259,7 +267,7 @@ int scsi_is_io_opcode(unsigned char op)
 	case WRITE_6:
 	case READ_10:
 	case WRITE_10:
-	case VERIFY:
+	case VERIFY_10:
 	case WRITE_VERIFY:
 	case READ_12:
 	case WRITE_12:

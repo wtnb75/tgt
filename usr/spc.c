@@ -139,6 +139,43 @@ static void update_vpd_83(struct scsi_lu *lu, void *id)
 	strncpy((char *)data + 4, id, SCSI_ID_LEN);
 }
 
+static void update_vpd_b2(struct scsi_lu *lu, void *id)
+{
+	struct vpd *vpd_pg = lu->attrs.lu_vpd[PCODE_OFFSET(0xb2)];
+	uint8_t	*data = vpd_pg->data;
+
+	if (lu->attrs.thinprovisioning) {
+		data[0] = 0;		/* threshold exponent */
+		data[1] = 0xe4;		/* LBPU LBPWS(10) LBPRZ */
+		data[2] = 0x02;		/* provisioning type */
+		data[3] = 0;
+	} else {
+		data[0] = 0;
+		data[1] = 0;
+		data[2] = 0;
+		data[3] = 0;
+	}
+}
+
+static void update_vpd_b0(struct scsi_lu *lu, void *id)
+{
+	struct vpd *vpd_pg = lu->attrs.lu_vpd[PCODE_OFFSET(0xb0)];
+
+	/* maximum compare and write length : 64kb */
+	vpd_pg->data[1] = 128;
+
+	if (lu->attrs.thinprovisioning) {
+		/* maximum unmap lba count : maximum*/
+		put_unaligned_be32(0xffffffff, vpd_pg->data + 16);
+
+		/* maximum unmap block descriptor count : maximum*/
+		put_unaligned_be32(0xffffffff, vpd_pg->data + 20);
+	} else {
+		put_unaligned_be32(0, vpd_pg->data + 16);
+		put_unaligned_be32(0, vpd_pg->data + 20);
+	}
+}
+
 static void update_b0_opt_xfer_gran(struct scsi_lu *lu, int opt_xfer_gran)
 {
 	struct vpd *vpd_pg = lu->attrs.lu_vpd[PCODE_OFFSET(0xb0)];
@@ -262,7 +299,7 @@ int spc_report_luns(int host_no, struct scsi_cmd *cmd)
 	struct scsi_lu *lu;
 	struct list_head *dev_list = &cmd->c_target->device_list;
 	uint64_t lun, *data;
-	int idx, alen, oalen, nr_luns;
+	int idx, alen, nr_luns;
 	unsigned char key = ILLEGAL_REQUEST;
 	uint16_t asc = ASC_INVALID_FIELD_IN_CDB;
 	uint8_t *scb = cmd->scb;
@@ -279,8 +316,6 @@ int spc_report_luns(int host_no, struct scsi_cmd *cmd)
 	memset(data, 0, alen);
 
 	alen &= ~(8 - 1);
-	oalen = alen;
-
 	alen -= 8;
 	idx = 1;
 	nr_luns = 0;
@@ -309,12 +344,36 @@ sense:
 
 int spc_start_stop(int host_no, struct scsi_cmd *cmd)
 {
+	uint8_t *scb = cmd->scb;
+	int start, loej;
+
 	scsi_set_in_resid_by_actual(cmd, 0);
 
 	if (device_reserved(cmd))
 		return SAM_STAT_RESERVATION_CONFLICT;
-	else
-		return SAM_STAT_GOOD;
+
+	loej  = scb[4] & 0x02;
+	start = scb[4] & 0x01;
+
+	if (loej == 1 && start == 0) {
+		if (lu_prevent_removal(cmd->dev)) {
+			if (cmd->dev->attrs.online) {
+				/*  online == media is present */
+				sense_data_build(cmd, ILLEGAL_REQUEST,
+					ASC_MEDIUM_REMOVAL_PREVENTED);
+			} else {
+				/* !online == media is not present */
+				sense_data_build(cmd, NOT_READY,
+				ASC_MEDIUM_REMOVAL_PREVENTED);
+			}
+			return SAM_STAT_CHECK_CONDITION;
+		}
+		spc_lu_offline(cmd->dev);
+	}
+	if (loej == 1 && start == 1)
+		spc_lu_online(cmd->dev);
+
+	return SAM_STAT_GOOD;
 }
 
 int spc_test_unit(int host_no, struct scsi_cmd *cmd)
@@ -335,12 +394,15 @@ int spc_test_unit(int host_no, struct scsi_cmd *cmd)
 
 int spc_prevent_allow_media_removal(int host_no, struct scsi_cmd *cmd)
 {
-	/* TODO: implement properly */
+	uint8_t *scb = cmd->scb;
+	struct it_nexus_lu_info *itn_lu_info = cmd->itn_lu_info;
 
 	if (device_reserved(cmd))
 		return SAM_STAT_RESERVATION_CONFLICT;
-	else
-		return SAM_STAT_GOOD;
+
+	itn_lu_info->prevent = scb[4] & PREVENT_MASK;
+
+	return SAM_STAT_GOOD;
 }
 
 int spc_mode_select(int host_no, struct scsi_cmd *cmd,
@@ -693,15 +755,12 @@ static int report_opcodes_all(struct scsi_cmd *cmd, int rctd,
 int spc_report_supported_opcodes(int host_no, struct scsi_cmd *cmd)
 {
 	uint8_t reporting_options;
-	uint8_t requested_opcode;
 	uint16_t requested_service_action;
 	uint32_t alloc_len;
 	int rctd;
 	int ret = SAM_STAT_GOOD;
 
 	reporting_options = cmd->scb[2] & 0x07;
-
-	requested_opcode = cmd->scb[3];
 
 	requested_service_action = cmd->scb[4];
 	requested_service_action <<= 8;
@@ -735,7 +794,7 @@ struct service_action maint_in_service_actions[] = {
 	{0, NULL}
 };
 
-static struct service_action *
+struct service_action *
 find_service_action(struct service_action *service_action, uint32_t action)
 {
 	while (service_action->cmd_perform) {
@@ -744,6 +803,22 @@ find_service_action(struct service_action *service_action, uint32_t action)
 		service_action++;
 	}
 	return NULL;
+}
+
+int spc_send_diagnostics(int host_no, struct scsi_cmd *cmd)
+{
+	uint16_t asc = ASC_INVALID_FIELD_IN_CDB;
+	uint8_t key = ILLEGAL_REQUEST;
+
+	/* we only support SELF-TEST==1 */
+	if (!(cmd->scb[1] & 0x04))
+		goto sense;
+
+	return SAM_STAT_GOOD;
+sense:
+	scsi_set_in_resid_by_actual(cmd, 0);
+	sense_data_build(cmd, key, asc);
+	return SAM_STAT_CHECK_CONDITION;
 }
 
 /*
@@ -1054,8 +1129,6 @@ static int spc_pr_reserve(int host_no, struct scsi_cmd *cmd)
 	uint16_t asc = ASC_INVALID_FIELD_IN_CDB;
 	uint8_t key = ILLEGAL_REQUEST;
 	uint8_t pr_scope, pr_type;
-	uint8_t *buf;
-	uint64_t res_key, sa_res_key;
 	int ret;
 	struct registration *reg, *holder;
 
@@ -1065,11 +1138,6 @@ static int spc_pr_reserve(int host_no, struct scsi_cmd *cmd)
 
 	pr_scope = (cmd->scb[2] & 0xf0) >> 4;
 	pr_type = cmd->scb[2] & 0x0f;
-
-	buf = scsi_get_out_buffer(cmd);
-
-	res_key = get_unaligned_be64(buf);
-	sa_res_key = get_unaligned_be64(buf + 8);
 
 	switch (pr_type) {
 	case PR_TYPE_WRITE_EXCLUSIVE:
@@ -1119,7 +1187,7 @@ static int spc_pr_release(int host_no, struct scsi_cmd *cmd)
 	uint8_t key = ILLEGAL_REQUEST;
 	uint8_t pr_scope, pr_type;
 	uint8_t *buf;
-	uint64_t res_key, sa_res_key;
+	uint64_t res_key;
 	int ret;
 	struct registration *reg, *holder, *sibling;
 
@@ -1133,7 +1201,6 @@ static int spc_pr_release(int host_no, struct scsi_cmd *cmd)
 	buf = scsi_get_out_buffer(cmd);
 
 	res_key = get_unaligned_be64(buf);
-	sa_res_key = get_unaligned_be64(buf + 8);
 
 	reg = lookup_registration_by_nexus(cmd->dev, cmd->it_nexus);
 	if (!reg)
@@ -1190,7 +1257,7 @@ static int spc_pr_clear(int host_no, struct scsi_cmd *cmd)
 	uint16_t asc = ASC_INVALID_FIELD_IN_CDB;
 	uint8_t key = ILLEGAL_REQUEST;
 	uint8_t *buf;
-	uint64_t res_key, sa_res_key;
+	uint64_t res_key;
 	int ret;
 	struct registration *reg, *holder, *sibling, *n;
 
@@ -1201,7 +1268,6 @@ static int spc_pr_clear(int host_no, struct scsi_cmd *cmd)
 	buf = scsi_get_out_buffer(cmd);
 
 	res_key = get_unaligned_be64(buf);
-	sa_res_key = get_unaligned_be64(buf + 8);
 
 	reg = lookup_registration_by_nexus(cmd->dev, cmd->it_nexus);
 	if (!reg)
@@ -1239,7 +1305,7 @@ static int spc_pr_preempt(int host_no, struct scsi_cmd *cmd)
 {
 	uint16_t asc = ASC_INVALID_FIELD_IN_CDB;
 	uint8_t key = ILLEGAL_REQUEST;
-	int ret, abort;
+	int ret;
 	int res_released = 0, remove_all_reg = 0;
 	uint64_t res_key, sa_res_key;
 	uint8_t pr_scope, pr_type;
@@ -1249,8 +1315,6 @@ static int spc_pr_preempt(int host_no, struct scsi_cmd *cmd)
 	ret = check_pr_out_basic_parameter(cmd);
 	if (ret)
 		goto sense;
-
-	abort = ((cmd->scb[1] & 0x1f) == PR_OUT_PREEMPT_AND_ABORT);
 
 	pr_scope = (cmd->scb[2] & 0xf0) >> 4;
 	pr_type = cmd->scb[2] & 0x0f;
@@ -1332,7 +1396,6 @@ static int spc_pr_register_and_move(int host_no, struct scsi_cmd *cmd)
 	uint16_t asc = ASC_INVALID_FIELD_IN_CDB;
 	uint8_t key = ILLEGAL_REQUEST;
 	char *buf;
-	uint8_t pr_scope, pr_type;
 	uint8_t unreg;
 	uint64_t res_key, sa_res_key;
 	uint32_t addlen, idlen;
@@ -1340,9 +1403,6 @@ static int spc_pr_register_and_move(int host_no, struct scsi_cmd *cmd)
 	uint16_t len = 24;
 	int (*id)(int, uint64_t, char *, int);
 	char tpid[300]; /* large enough? */
-
-	pr_scope = (cmd->scb[2] & 0xf0) >> 4;
-	pr_type = cmd->scb[2] & 0x0f;
 
 	if (get_unaligned_be16(cmd->scb + 7) < len)
 		goto sense;
@@ -1509,9 +1569,10 @@ static struct mode_pg *alloc_mode_pg(uint8_t pcode, uint8_t subpcode,
 	return pg;
 }
 
-int add_mode_page(struct scsi_lu *lu, char *p)
+tgtadm_err add_mode_page(struct scsi_lu *lu, char *p)
 {
-	int i, tmp, ret = TGTADM_SUCCESS;
+	tgtadm_err adm_err = TGTADM_SUCCESS;
+	int i, tmp;
 	uint8_t pcode, subpcode, *data;
 	uint16_t size;
 	struct mode_pg *pg;
@@ -1535,7 +1596,7 @@ int add_mode_page(struct scsi_lu *lu, char *p)
 
 			pg = alloc_mode_pg(pcode, subpcode, size);
 			if (!pg) {
-				ret = TGTADM_NOMEM;
+				adm_err = TGTADM_NOMEM;
 				goto exit;
 			}
 
@@ -1560,12 +1621,12 @@ int add_mode_page(struct scsi_lu *lu, char *p)
 	}
 
 	if (i != size + 3) {
-		ret = TGTADM_INVALID_REQUEST;
+		adm_err = TGTADM_INVALID_REQUEST;
 		eprintf("Mode Page %d (0x%02x): param_count %d != "
 			"MODE PAGE size : %d\n", pcode, subpcode, i, size + 3);
 	}
 exit:
-	return ret;
+	return adm_err;
 }
 
 void dump_cdb(struct scsi_cmd *cmd)
@@ -1617,7 +1678,7 @@ enum {
 	Opt_removable, Opt_readonly, Opt_online,
 	Opt_mode_page,
 	Opt_path,
-	Opt_bsoflags,
+	Opt_bsoflags, Opt_thinprovisioning,
 	Opt_err,
 };
 
@@ -1638,24 +1699,28 @@ static match_table_t tokens = {
 	{Opt_mode_page, "mode_page=%s"},
 	{Opt_path, "path=%s"},
 	{Opt_bsoflags, "bsoflags=%s"},
+	{Opt_thinprovisioning, "thin_provisioning=%s"},
 	{Opt_err, NULL},
 };
 
-int spc_lu_online(struct scsi_lu *lu)
+tgtadm_err spc_lu_online(struct scsi_lu *lu)
 {
 	lu->attrs.online = 1;
-	return 0;
+	return TGTADM_SUCCESS;
 }
 
-int spc_lu_offline(struct scsi_lu *lu)
+tgtadm_err spc_lu_offline(struct scsi_lu *lu)
 {
+	if (lu_prevent_removal(lu))
+		return TGTADM_PREVENT_REMOVAL;
+
 	lu->attrs.online = 0;
-	return 0;
+	return TGTADM_SUCCESS;
 }
 
-int lu_config(struct scsi_lu *lu, char *params, match_fn_t *fn)
+tgtadm_err lu_config(struct scsi_lu *lu, char *params, match_fn_t *fn)
 {
-	int err = TGTADM_SUCCESS;
+	tgtadm_err adm_err = TGTADM_SUCCESS;
 	char *p;
 	char buf[1024];
 	struct lu_phy_attr *attrs;
@@ -1704,6 +1769,7 @@ int lu_config(struct scsi_lu *lu, char *params, match_fn_t *fn)
 		case Opt_lbppbe:
 			match_strncpy(buf, &args[0], sizeof(buf));
 			attrs->lbppbe = atoi(buf);
+			attrs->no_auto_lbppbe = 1;
 			break;
 		case Opt_la_lba:
 			match_strncpy(buf, &args[0], sizeof(buf));
@@ -1725,29 +1791,36 @@ int lu_config(struct scsi_lu *lu, char *params, match_fn_t *fn)
 			match_strncpy(buf, &args[0], sizeof(buf));
 			attrs->readonly = atoi(buf);
 			break;
+		case Opt_thinprovisioning:
+			match_strncpy(buf, &args[0], sizeof(buf));
+			attrs->thinprovisioning = atoi(buf);
+			/* update the provisioning vpd page */
+			lu_vpd[PCODE_OFFSET(0xb0)]->vpd_update(lu, NULL);
+			lu_vpd[PCODE_OFFSET(0xb2)]->vpd_update(lu, NULL);
+			break;
 		case Opt_online:
 			match_strncpy(buf, &args[0], sizeof(buf));
 			if (atoi(buf))
-				lu->dev_type_template.lu_online(lu);
+				adm_err = lu->dev_type_template.lu_online(lu);
 			else
-				lu->dev_type_template.lu_offline(lu);
+				adm_err = lu->dev_type_template.lu_offline(lu);
 			break;
 		case Opt_mode_page:
 			match_strncpy(buf, &args[0], sizeof(buf));
-			err = add_mode_page(lu, buf);
+			adm_err = add_mode_page(lu, buf);
 			break;
 		case Opt_path:
 			match_strncpy(buf, &args[0], sizeof(buf));
-			err = tgt_device_path_update(lu->tgt, lu, buf);
+			adm_err = tgt_device_path_update(lu->tgt, lu, buf);
 			break;
 		default:
-			err |= fn ? fn(lu, p) : TGTADM_INVALID_REQUEST;
+			adm_err = fn ? fn(lu, p) : TGTADM_INVALID_REQUEST;
 		}
 	}
-	return err;
+	return adm_err;
 }
 
-int spc_lu_config(struct scsi_lu *lu, char *params)
+tgtadm_err spc_lu_config(struct scsi_lu *lu, char *params)
 {
 	return lu_config(lu, params, NULL);
 }
@@ -1760,6 +1833,10 @@ int spc_lu_init(struct scsi_lu *lu)
 
 	lu->attrs.device_type = lu->dev_type_template.type;
 	lu->attrs.qualifier = 0x0;
+	lu->attrs.thinprovisioning = 0;
+	lu->attrs.removable = 0;
+	lu->attrs.readonly = 0;
+	lu->attrs.sense_format = 0;
 
 	snprintf(lu->attrs.vendor_id, sizeof(lu->attrs.vendor_id),
 		 "%-16s", VENDOR_ID);
@@ -1773,12 +1850,16 @@ int spc_lu_init(struct scsi_lu *lu)
 	/* VPD page 0x80 */
 	pg = PCODE_OFFSET(0x80);
 	lu_vpd[pg] = alloc_vpd(SCSI_SN_LEN);
+	if (!lu_vpd[pg])
+		return -ENOMEM;
 	lu_vpd[pg]->vpd_update = update_vpd_80;
 	lu_vpd[pg]->vpd_update(lu, lu->attrs.scsi_sn);
 
 	/* VPD page 0x83 */
 	pg = PCODE_OFFSET(0x83);
 	lu_vpd[pg] = alloc_vpd(SCSI_ID_LEN + 4);
+	if (!lu_vpd[pg])
+		return -ENOMEM;
 	lu_vpd[pg]->vpd_update = update_vpd_83;
 	lu_vpd[pg]->vpd_update(lu, lu->attrs.scsi_id);
 
@@ -1789,6 +1870,19 @@ int spc_lu_init(struct scsi_lu *lu)
 	lu->attrs.removable = 0;
 	lu->attrs.readonly = 0;
 	lu->attrs.sense_format = 0;
+	if (!lu_vpd[pg])
+		return -ENOMEM;
+	lu_vpd[pg]->vpd_update = update_vpd_b0;
+	lu_vpd[pg]->vpd_update(lu, NULL);
+
+	/* VPD page 0xb2 LOGICAL BLOCK PROVISIONING*/
+	pg = PCODE_OFFSET(0xb2);
+	lu_vpd[pg] = alloc_vpd(LBP_VPD_LEN);
+	if (!lu_vpd[pg])
+		return -ENOMEM;
+	lu_vpd[pg]->vpd_update = update_vpd_b2;
+	lu_vpd[pg]->vpd_update(lu, NULL);
+
 	lu->dev_type_template.lu_offline(lu);
 
 	return 0;

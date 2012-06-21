@@ -85,20 +85,16 @@ struct backingstore_template *get_backingstore_template(const char *name)
 	return NULL;
 }
 
-int backingstore_show(char *buf, size_t rest)
+int backingstore_show(struct concat_buf *b)
 {
-	int total=0, max=rest;
 	struct backingstore_template *bst;
 	pthread_mutex_lock(&bst_lock);
-	shprintf(total, buf, rest, "Backing-Store:\n");
+	concat_printf(b, "Backing-Store:\n");
 	list_for_each_entry(bst, &bst_list, backingstore_siblings) {
-		shprintf(total, buf, rest, _TAB1 "%s\n", bst->bs_name);
+		concat_printf(b, _TAB1 "%s\n", bst->bs_name);
 	}
 	pthread_mutex_unlock(&bst_lock);
-	return total;
-overflow:
-	pthread_mutex_unlock(&bst_lock);
-	return max;
+	return 0;
 }
 
 int backingstore_new(char *buf, size_t sz)
@@ -385,8 +381,8 @@ int bs_init(void)
 	return 1;
 }
 
-int bs_thread_open(struct bs_thread_info *info, request_func_t *rfn,
-		   int nr_threads)
+tgtadm_err bs_thread_open(struct bs_thread_info *info, request_func_t *rfn,
+			  int nr_threads)
 {
 	int i, ret;
 
@@ -418,7 +414,7 @@ int bs_thread_open(struct bs_thread_info *info, request_func_t *rfn,
 	pthread_mutex_unlock(&info->startup_lock);
 	info->nr_worker_threads = nr_threads;
 
-	return 0;
+	return TGTADM_SUCCESS;
 destroy_threads:
 	info->stop = 1;
 
