@@ -317,6 +317,9 @@ extern int iscsi_transportid(int tid, uint64_t itn_id, char *buf, int size);
 extern int iscsi_add_portal(char *addr, int port, int tpgt);
 extern int iscsi_delete_portal(char *addr, int port);
 extern int iscsi_param_parse_portals(char *p, int do_add, int do_delete);
+extern void iscsi_update_conn_stats_rx(struct iscsi_connection *conn, int size, int opcode);
+extern void iscsi_update_conn_stats_tx(struct iscsi_connection *conn, int size, int opcode);
+extern void iscsi_rsp_set_residual(struct iscsi_cmd_rsp *rsp, struct scsi_cmd *scmd);
 
 /* iscsid.c iscsi_task */
 extern void iscsi_free_task(struct iscsi_task *task);
@@ -339,6 +342,8 @@ extern int iscsi_target_create(struct target *);
 extern void iscsi_target_destroy(int tid, int force);
 extern tgtadm_err iscsi_target_show(int mode, int tid, uint64_t sid, uint32_t cid,
 				    uint64_t lun, struct concat_buf *b);
+extern tgtadm_err iscsi_stat(int mode, int tid, uint64_t sid, uint32_t cid,
+			     uint64_t lun, struct concat_buf *b);
 extern tgtadm_err iscsi_target_update(int mode, int op, int tid, uint64_t sid, uint64_t lun,
 				      uint32_t cid, char *name);
 extern int target_redirected(struct iscsi_target *target,

@@ -54,8 +54,7 @@ static char program_name[] = "tgtd";
 static LIST_HEAD(tgt_events_list);
 static LIST_HEAD(tgt_sched_events_list);
 
-static struct option const long_options[] =
-{
+static struct option const long_options[] = {
 	{"foreground", no_argument, 0, 'f'},
 	{"control-port", required_argument, 0, 'C'},
 	{"nr_iothreads", required_argument, 0, 't'},
@@ -66,32 +65,36 @@ static struct option const long_options[] =
 };
 
 static char *short_options = "fC:d:t:Vh";
+static char *spare_args;
 
 static void usage(int status)
 {
-	if (status)
-		fprintf(stderr, "Try `%s --help' for more information.\n", program_name);
-	else {
-		printf("Usage: %s [OPTION]\n", program_name);
-		printf("\
-Target framework daemon, version %s\n\
-  -f, --foreground        make the program run in the foreground\n\
-  -C, --control-port NNNN use port NNNN for the mgmt channel\n\
-  -t, --nr_iothreads NNNN specify the number of I/O threads\n\
-  -d, --debug debuglevel  print debugging information\n\
-  -V, --version           print version and exit\n\
-  -h, --help              display this help and exit\n\
-", TGT_VERSION);
+	if (status) {
+		fprintf(stderr, "Try `%s --help' for more information.\n",
+			program_name);
+		exit(status);
 	}
-	exit(status);
+
+	printf("Linux SCSI Target framework daemon, version %s\n\n"
+		"Usage: %s [OPTION]\n"
+		"-f, --foreground        make the program run in the foreground\n"
+		"-C, --control-port NNNN use port NNNN for the mgmt channel\n"
+		"-t, --nr_iothreads NNNN specify the number of I/O threads\n"
+		"-d, --debug debuglevel  print debugging information\n"
+		"-V, --version           print version and exit\n"
+		"-h, --help              display this help and exit\n",
+		TGT_VERSION, program_name);
+	exit(0);
 }
 
 static void bad_optarg(int ret, int ch, char *optarg)
 {
 	if (ret == ERANGE)
-		fprintf(stderr, "-%c argument value '%s' out of range\n", ch, optarg);
+		fprintf(stderr, "-%c argument value '%s' out of range\n",
+			ch, optarg);
 	else
-		fprintf(stderr, "-%c argument value '%s' invalid\n", ch, optarg);
+		fprintf(stderr, "-%c argument value '%s' invalid\n",
+			ch, optarg);
 	usage(ret);
 }
 
@@ -102,9 +105,10 @@ static void version(void)
 }
 
 /* Default TGT mgmt port */
-short int control_port = 0;
+short int control_port;
 
-static void signal_catch(int signo) {
+static void signal_catch(int signo)
+{
 }
 
 static int oom_adjust(void)
@@ -117,12 +121,14 @@ static int oom_adjust(void)
 	sprintf(path, "/proc/%d/oom_adj", getpid());
 	fd = open(path, O_WRONLY);
 	if (fd < 0) {
-		fprintf(stderr, "can't adjust oom-killer's pardon %s, %m\n", path);
+		fprintf(stderr, "can't adjust oom-killer's pardon %s, %m\n",
+			path);
 		return errno;
 	}
 	err = write(fd, "-17\n", 4);
 	if (err < 0) {
-		fprintf(stderr, "can't adjust oom-killer's pardon %s, %m\n", path);
+		fprintf(stderr, "can't adjust oom-killer's pardon %s, %m\n",
+			path);
 		close(fd);
 		return errno;
 	}
@@ -449,20 +455,29 @@ retry:
 #endif
 }
 
-static int lld_init(char *args)
+int lld_init_one(int lld_index)
 {
-	int i, err, nr;
+	int err;
+
+	INIT_LIST_HEAD(&tgt_drivers[lld_index]->target_list);
+	if (tgt_drivers[lld_index]->init) {
+		err = tgt_drivers[lld_index]->init(lld_index, spare_args);
+		if (err) {
+			tgt_drivers[lld_index]->drv_state = DRIVER_ERR;
+			return err;
+		}
+		tgt_drivers[lld_index]->drv_state = DRIVER_INIT;
+	}
+	return 0;
+}
+
+static int lld_init(void)
+{
+	int i, nr;
 
 	for (i = nr = 0; tgt_drivers[i]; i++) {
-		if (tgt_drivers[i]->init) {
-			err = tgt_drivers[i]->init(i, args);
-			if (err) {
-				tgt_drivers[i]->drv_state = DRIVER_ERR;
-				continue;
-			}
-			tgt_drivers[i]->drv_state = DRIVER_INIT;
-		}
-		nr++;
+		if (!lld_init_one(i))
+			nr++;
 	}
 	return nr;
 }
@@ -520,7 +535,6 @@ int main(int argc, char **argv)
 {
 	struct sigaction sa_old;
 	struct sigaction sa_new;
-	char *spare_args;
 	int err, ch, longindex, nr_lld = 0;
 	int is_daemon = 1, is_debug = 0;
 	int ret;
@@ -593,28 +607,28 @@ int main(int argc, char **argv)
 
 	spare_args = optind < argc ? argv[optind] : NULL;
 
-	nr_lld = lld_init(spare_args);
-	if (!nr_lld) {
-		fprintf(stderr, "No available low level driver!\n");
-		exit(1);
-	}
-
 	err = ipc_init();
 	if (err)
 		exit(1);
 
-	if (is_daemon && daemon(0,0))
+	if (is_daemon && daemon(0, 0))
 		exit(1);
+
+	err = log_init(program_name, LOG_SPACE_SIZE, is_daemon, is_debug);
+	if (err)
+		exit(1);
+
+	nr_lld = lld_init();
+	if (!nr_lld) {
+		fprintf(stderr, "No available low level driver!\n");
+		exit(1);
+	}
 
 	err = oom_adjust();
 	if (err)
 		exit(1);
 
 	err = nr_file_adjust();
-	if (err)
-		exit(1);
-
-	err = log_init(program_name, LOG_SPACE_SIZE, is_daemon, is_debug);
 	if (err)
 		exit(1);
 

@@ -69,8 +69,13 @@ static off_t find_next_hole(struct scsi_lu *dev, off_t offset)
 static int sbc_mode_page_update(struct scsi_cmd *cmd, uint8_t *data, int *changed)
 {
 	uint8_t pcode = data[0] & 0x3f;
-	struct mode_pg *pg = cmd->dev->mode_pgs[pcode];
+	uint8_t subpcode = data[1];
+	struct mode_pg *pg;
 	uint8_t old;
+
+	pg = find_mode_page(cmd->dev, pcode, subpcode);
+	if (pg == NULL)
+		return 1;
 
 	eprintf("%x %x\n", pg->mode_data[0], data[2]);
 
@@ -182,15 +187,15 @@ static int sbc_unmap(int host_no, struct scsi_cmd *cmd)
 		goto sense;
 	}
 
-	if (!lu->attrs.thinprovisioning) {
-		key = ILLEGAL_REQUEST;
-		asc = ASC_INVALID_OP_CODE;
-		goto sense;
-	}
-
 	if (lu->attrs.removable && !lu->attrs.online) {
 		key = NOT_READY;
 		asc = ASC_MEDIUM_NOT_PRESENT;
+		goto sense;
+	}
+
+	if (!lu->attrs.thinprovisioning) {
+		key = ILLEGAL_REQUEST;
+		asc = ASC_INVALID_OP_CODE;
 		goto sense;
 	}
 
@@ -242,6 +247,11 @@ static int sbc_rw(int host_no, struct scsi_cmd *cmd)
 	case WRITE_10:
 	case WRITE_12:
 	case WRITE_16:
+	case ORWRITE_16:
+	case WRITE_VERIFY:
+	case WRITE_VERIFY_12:
+	case WRITE_VERIFY_16:
+	case COMPARE_AND_WRITE:
 		/* We only support protection information type 0 */
 		if (cmd->scb[1] & 0xe0) {
 			key = ILLEGAL_REQUEST;
@@ -286,10 +296,15 @@ static int sbc_rw(int host_no, struct scsi_cmd *cmd)
 		case WRITE_10:
 		case WRITE_12:
 		case WRITE_16:
+		case ORWRITE_16:
+		case WRITE_VERIFY:
+		case WRITE_VERIFY_12:
+		case WRITE_VERIFY_16:
 		case WRITE_SAME:
 		case WRITE_SAME_16:
 		case PRE_FETCH_10:
 		case PRE_FETCH_16:
+		case COMPARE_AND_WRITE:
 			key = DATA_PROTECT;
 			asc = ASC_WRITE_PROTECT;
 			goto sense;
@@ -319,6 +334,36 @@ static int sbc_rw(int host_no, struct scsi_cmd *cmd)
 
 	cmd->offset = lba << cmd->dev->blk_shift;
 	cmd->tl     = tl  << cmd->dev->blk_shift;
+
+	/* Handle residuals */
+	switch (cmd->scb[0]) {
+	case READ_6:
+	case READ_10:
+	case READ_12:
+	case READ_16:
+		if (cmd->tl != scsi_get_in_length(cmd))
+			scsi_set_in_resid_by_actual(cmd, cmd->tl);
+		break;
+	case WRITE_6:
+	case WRITE_10:
+	case WRITE_12:
+	case WRITE_16:
+	case WRITE_VERIFY:
+	case WRITE_VERIFY_12:
+	case WRITE_VERIFY_16:
+		if (cmd->tl != scsi_get_out_length(cmd)) {
+			scsi_set_out_resid_by_actual(cmd, cmd->tl);
+
+			/* We need to clamp the size of the in-buffer
+			 * so that we dont try to write > cmd->tl in the
+			 * backend store.
+			 */
+			if (cmd->tl < scsi_get_out_length(cmd)) {
+				scsi_set_out_length(cmd, cmd->tl);
+			}
+		}
+		break;
+	}
 
 	ret = cmd->dev->bst->bs_cmd_submit(cmd);
 	if (ret) {
@@ -423,18 +468,27 @@ static int sbc_verify(int host_no, struct scsi_cmd *cmd)
 		return SAM_STAT_GOOD;
 	}
 
-	lba = scsi_rw_offset(cmd->scb) << cmd->dev->blk_shift;
-	tl  = scsi_rw_count(cmd->scb) << cmd->dev->blk_shift;
+	lba = scsi_rw_offset(cmd->scb);
+	tl  = scsi_rw_count(cmd->scb);
 
 	/* Verify that we are not doing i/o beyond
 	   the end-of-lun */
-	if (tl && (lba + tl > lu->size)) {
-		key = ILLEGAL_REQUEST;
-		asc = ASC_LBA_OUT_OF_RANGE;
-		goto sense;
+	if (tl) {
+		if (lba + tl < lba ||
+		    lba + tl > lu->size >> cmd->dev->blk_shift) {
+			key = ILLEGAL_REQUEST;
+			asc = ASC_LBA_OUT_OF_RANGE;
+			goto sense;
+		}
+	} else {
+		if (lba >= lu->size >> cmd->dev->blk_shift) {
+			key = ILLEGAL_REQUEST;
+			asc = ASC_LBA_OUT_OF_RANGE;
+			goto sense;
+		}
 	}
 
-	cmd->offset = lba;
+	cmd->offset = lba << cmd->dev->blk_shift;
 
 	ret = cmd->dev->bst->bs_cmd_submit(cmd);
 	if (ret) {
@@ -453,13 +507,14 @@ sense:
 
 static int sbc_readcapacity16(int host_no, struct scsi_cmd *cmd)
 {
-	uint32_t *data;
+	uint32_t alloc_len, avail_len, actual_len;
+	uint8_t *data;
+	uint8_t buf[32];
 	unsigned int bshift;
 	uint64_t size;
-	int len = 32;
-	int val;
+	uint32_t val;
+	uint16_t asc = ASC_INVALID_FIELD_IN_CDB;
 	unsigned char key = ILLEGAL_REQUEST;
-	uint16_t asc = ASC_INVALID_OP_CODE;
 
 	if (cmd->dev->attrs.removable && !cmd->dev->attrs.online) {
 		key = NOT_READY;
@@ -467,27 +522,29 @@ static int sbc_readcapacity16(int host_no, struct scsi_cmd *cmd)
 		goto sense;
 	}
 
-	if (scsi_get_in_length(cmd) < 16)
-		goto overflow;
+	alloc_len = get_unaligned_be32(&cmd->scb[10]);
+	if (scsi_get_in_length(cmd) < alloc_len)
+		goto sense;
 
-	len = min_t(int, len, scsi_get_in_length(cmd));
-
-	data = scsi_get_in_buffer(cmd);
-	memset(data, 0, len);
+	data = buf;
+	memset(data, 0, 32);
+	avail_len = 32;
 
 	bshift = cmd->dev->blk_shift;
 	size = cmd->dev->size >> bshift;
 
-	*((uint64_t *)(data)) = __cpu_to_be64(size - 1);
-	data[2] = __cpu_to_be32(1UL << bshift);
+	put_unaligned_be64(size - 1, &data[0]);
+	put_unaligned_be32(1UL << bshift, &data[8]);
 
 	val = (cmd->dev->attrs.lbppbe << 16) | cmd->dev->attrs.la_lba;
 	if (cmd->dev->attrs.thinprovisioning)
 		val |= (3 << 14); /* set LBPME and LBPRZ */
-	data[3] = __cpu_to_be32(val);
+	put_unaligned_be32(val, &data[12]);
 
-overflow:
-	scsi_set_in_resid_by_actual(cmd, len);
+	actual_len = spc_memcpy(scsi_get_in_buffer(cmd), &alloc_len,
+				data, avail_len);
+	scsi_set_in_resid_by_actual(cmd, actual_len);
+
 	return SAM_STAT_GOOD;
 
 sense:
@@ -497,26 +554,19 @@ sense:
 
 static int sbc_getlbastatus(int host_no, struct scsi_cmd *cmd)
 {
-	int len = 32;
 	uint64_t offset;
-	uint32_t pdl;
-	int type;
+	uint32_t alloc_len, avail_len, actual_len, remain_len;
 	unsigned char *buf;
-	unsigned char key = ILLEGAL_REQUEST;
-	uint16_t asc = ASC_INVALID_OP_CODE;
+	uint8_t data[16];
+	int mapped;
+	uint16_t asc;
+	unsigned char key;
 
 	if (cmd->dev->attrs.removable && !cmd->dev->attrs.online) {
 		key = NOT_READY;
 		asc = ASC_MEDIUM_NOT_PRESENT;
 		goto sense;
 	}
-
-	if (scsi_get_in_length(cmd) < 24)
-		goto overflow;
-
-	len = scsi_get_in_length(cmd);
-	buf = scsi_get_in_buffer(cmd);
-	memset(buf, 0, len);
 
 	offset = get_unaligned_be64(&cmd->scb[2]) << cmd->dev->blk_shift;
 	if (offset >= cmd->dev->size) {
@@ -525,41 +575,53 @@ static int sbc_getlbastatus(int host_no, struct scsi_cmd *cmd)
 		goto sense;
 	}
 
-	pdl = 4;
-	put_unaligned_be32(pdl, &buf[0]);
+	alloc_len = get_unaligned_be32(&cmd->scb[10]);
+	if (alloc_len < 4 || scsi_get_in_length(cmd) < alloc_len) {
+		key = ILLEGAL_REQUEST;
+		asc = ASC_INVALID_FIELD_IN_CDB;
+		goto sense;
+	}
 
-	type = 0;
-	while (len >= 4 + pdl + 16) {
+	avail_len = 0;
+	remain_len = alloc_len;
+	buf = scsi_get_in_buffer(cmd);
+	memset(data, 0, 16);
+	/* Copy zeros now - Parameter Data Length to be set later */
+	actual_len = spc_memcpy(&buf[0], &remain_len, data, 8);
+	avail_len += 8;
+
+	mapped = 1;
+	do {
 		off_t next_offset;
+		uint64_t start_lba;
+		uint32_t num_blocks;
 
-		put_unaligned_be32(pdl + 16, &buf[0]);
-
-		if (offset >= cmd->dev->size)
-			break;
-
-		next_offset = (type == 0) ?
-			find_next_hole(cmd->dev, offset) :
-			find_next_data(cmd->dev, offset);
+		next_offset = (!mapped) ? find_next_data(cmd->dev, offset) :
+					  find_next_hole(cmd->dev, offset);
 		if (next_offset == offset) {
-			type = 1 - type;
+			mapped = 1 - mapped;
 			continue;
 		}
+		if (next_offset > cmd->dev->size)
+			next_offset = cmd->dev->size;
 
-		put_unaligned_be64(offset >> cmd->dev->blk_shift,
-				   &buf[4 + pdl +  0]);
-		put_unaligned_be32((next_offset - offset)
-				   >> cmd->dev->blk_shift,
-				   &buf[4 + pdl +  8]);
-		buf[4 + pdl + 12] = type;
+		start_lba = offset >> cmd->dev->blk_shift;
+		num_blocks = (next_offset - offset) >> cmd->dev->blk_shift;
+		put_unaligned_be64(start_lba, &data[0]);
+		put_unaligned_be32(num_blocks, &data[8]);
+		data[12] = (!mapped) ? 1 : 0; /* 0:mapped 1:deallocated */
 
-		pdl += 16;
-		type = 1 - type;
+		actual_len += spc_memcpy(&buf[avail_len], &remain_len,
+					 data, 16);
+		avail_len += 16;
+
+		mapped = 1 - mapped;
 		offset = next_offset;
-	}
-	len = 4 + pdl;
+	} while (offset < cmd->dev->size);
 
-overflow:
-	scsi_set_in_resid_by_actual(cmd, len);
+	put_unaligned_be32(avail_len - 4, &buf[0]); /* Parameter Data Len */
+
+	scsi_set_in_resid_by_actual(cmd, actual_len);
 	return SAM_STAT_GOOD;
 
 sense:
@@ -669,11 +731,15 @@ static tgtadm_err sbc_lu_init(struct scsi_lu *lu)
 		memset(mask, 0, sizeof(mask));
 		mask[0] = 0x4;
 
-		set_mode_page_changeable_mask(lu, 8, mask);
+		set_mode_page_changeable_mask(lu, 8, 0, mask);
 	}
 
 	/* Control page */
-	add_mode_page(lu, "10:0:10:2:0x10:0:0:0:0:0:0:2:0");
+	add_mode_page(lu, "0x0a:0:10:2:0x10:0:0:0:0:0:0:2:0");
+
+	/* Control Extensions mode page:  TCMOS:1 */
+	add_mode_page(lu, "0x0a:1:0x1c:0x04:0x00:0x00");
+
 	/* Informational Exceptions Control page */
 	add_mode_page(lu, "0x1c:0:10:8:0:0:0:0:0:0:0:0:0");
 
@@ -741,7 +807,7 @@ static struct device_type_template sbc_template = {
 		{spc_illegal_op,},
 		{spc_illegal_op,},
 		{spc_illegal_op,},
-		{spc_illegal_op,},
+		{sbc_rw, NULL, PR_EA_FA|PR_EA_FN},
 		{sbc_verify, NULL, PR_EA_FA|PR_EA_FN},
 
 		/* 0x30 */
@@ -814,12 +880,13 @@ static struct device_type_template sbc_template = {
 		{spc_illegal_op,},
 
 		{sbc_rw, NULL, PR_EA_FA|PR_EA_FN},
+		/* {sbc_rw, NULL, PR_EA_FA|PR_EA_FN}, */
 		{spc_illegal_op,},
 		{sbc_rw, NULL, PR_WE_FA|PR_EA_FA|PR_WE_FN|PR_EA_FN},
+		{sbc_rw, NULL, PR_EA_FA|PR_EA_FN},
 		{spc_illegal_op,},
 		{spc_illegal_op,},
-		{spc_illegal_op,},
-		{spc_illegal_op,},
+		{sbc_rw, NULL, PR_EA_FA|PR_EA_FN},
 		{sbc_verify, NULL, PR_EA_FA|PR_EA_FN},
 
 		/* 0x90 */
@@ -857,7 +924,7 @@ static struct device_type_template sbc_template = {
 		{spc_illegal_op,},
 		{spc_illegal_op,},
 		{spc_illegal_op,},
-		{spc_illegal_op,},
+		{sbc_rw, NULL, PR_EA_FA|PR_EA_FN},
 		{sbc_verify, NULL, PR_EA_FA|PR_EA_FN},
 
 		[0xb0 ... 0xff] = {spc_illegal_op},

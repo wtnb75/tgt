@@ -191,6 +191,13 @@ static tgtadm_err target_mgmt(int lld_no, struct mgmt_task *mtask)
 		concat_buf_finish(&mtask->rsp_concat);
 		break;
 	}
+	case OP_STATS:
+	{
+		concat_buf_init(&mtask->rsp_concat);
+		adm_err = tgt_stat_target_by_id(req->tid, &mtask->rsp_concat);
+		concat_buf_finish(&mtask->rsp_concat);
+		break;
+	}
 	default:
 		break;
 	}
@@ -244,6 +251,17 @@ static tgtadm_err device_mgmt(int lld_no, struct mgmt_task *mtask)
 		break;
 	case OP_UPDATE:
 		adm_err = tgt_device_update(req->tid, req->lun, params);
+		break;
+	case OP_STATS:
+		concat_buf_init(&mtask->rsp_concat);
+		if (!req->sid)
+			adm_err = tgt_stat_device_by_id(req->tid, req->lun,
+							&mtask->rsp_concat);
+		else if (tgt_drivers[lld_no]->stat)
+			adm_err = tgt_drivers[lld_no]->stat(req->mode, req->tid,
+							    req->sid, req->cid, req->lun,
+							    &mtask->rsp_concat);
+		concat_buf_finish(&mtask->rsp_concat);
 		break;
 	default:
 		break;
@@ -331,11 +349,44 @@ static tgtadm_err sys_mgmt(int lld_no, struct mgmt_task *mtask)
 							&mtask->rsp_concat);
 		concat_buf_finish(&mtask->rsp_concat);
 		break;
+	case OP_STATS:
+		concat_buf_init(&mtask->rsp_concat);
+		adm_err = tgt_stat_system(&mtask->rsp_concat);
+		concat_buf_finish(&mtask->rsp_concat);
+		break;
 	case OP_DELETE:
 		if (is_system_inactive())
 			adm_err = TGTADM_SUCCESS;
 		break;
 	default:
+		break;
+	}
+
+	return adm_err;
+}
+
+static tgtadm_err session_mgmt(int lld_no, struct mgmt_task *mtask)
+{
+	struct tgtadm_req *req = &mtask->req;
+	int adm_err = TGTADM_INVALID_REQUEST;
+
+	switch (req->op) {
+	case OP_STATS:
+		if (tgt_drivers[lld_no]->stat) {
+			concat_buf_init(&mtask->rsp_concat);
+			adm_err = tgt_drivers[lld_no]->stat(req->mode,
+							    req->tid, req->sid,
+							    req->cid, req->lun,
+							    &mtask->rsp_concat);
+			concat_buf_finish(&mtask->rsp_concat);
+		}
+		break;
+	default:
+		if (tgt_drivers[lld_no]->update)
+			adm_err = tgt_drivers[lld_no]->update(req->mode, req->op,
+							      req->tid,
+							      req->sid, req->lun,
+							      req->cid, mtask->req_buf);
 		break;
 	}
 
@@ -357,6 +408,16 @@ static tgtadm_err connection_mgmt(int lld_no, struct mgmt_task *mtask)
 							    &mtask->rsp_concat);
 			concat_buf_finish(&mtask->rsp_concat);
 			break;
+		}
+		break;
+	case OP_STATS:
+		if (tgt_drivers[lld_no]->stat) {
+			concat_buf_init(&mtask->rsp_concat);
+			adm_err = tgt_drivers[lld_no]->stat(req->mode,
+							    req->tid, req->sid,
+							    req->cid, req->lun,
+							    &mtask->rsp_concat);
+			concat_buf_finish(&mtask->rsp_concat);
 		}
 		break;
 	default:
@@ -395,6 +456,46 @@ static tgtadm_err backingstore_mgmt(int lld_no, struct mgmt_task *mtask)
 	return err;
 }
 
+static tgtadm_err lld_mgmt(int lld_no, struct mgmt_task *mtask)
+{
+	struct tgtadm_req *req = &mtask->req;
+	tgtadm_err adm_err = TGTADM_INVALID_REQUEST;
+
+	switch (req->op) {
+	case OP_START:
+		if (tgt_drivers[lld_no]->drv_state != DRIVER_INIT) {
+			if (!lld_init_one(lld_no))
+				adm_err = TGTADM_SUCCESS;
+			else
+				adm_err = TGTADM_UNKNOWN_ERR;
+		} else
+			adm_err = TGTADM_SUCCESS;
+		break;
+	case OP_STOP:
+		if (tgt_drivers[lld_no]->drv_state == DRIVER_INIT) {
+			if (list_empty(&tgt_drivers[lld_no]->target_list)) {
+				if (tgt_drivers[lld_no]->exit) {
+					tgt_drivers[lld_no]->exit();
+					tgt_drivers[lld_no]->drv_state = DRIVER_EXIT;
+				}
+				adm_err = TGTADM_SUCCESS;
+			} else
+				adm_err = TGTADM_DRIVER_ACTIVE;
+		} else
+			adm_err = TGTADM_SUCCESS;
+		break;
+	case OP_SHOW:
+		concat_buf_init(&mtask->rsp_concat);
+		adm_err = lld_show(&mtask->rsp_concat);
+		concat_buf_finish(&mtask->rsp_concat);
+		break;
+	default:
+		break;
+	}
+
+	return adm_err;
+}
+
 static tgtadm_err mtask_execute(struct mgmt_task *mtask)
 {
 	struct tgtadm_req *req = &mtask->req;
@@ -405,7 +506,10 @@ static tgtadm_err mtask_execute(struct mgmt_task *mtask)
 		lld_no = 0;
 	else {
 		lld_no = get_driver_index(req->lld);
-		if (lld_no < 0 || tgt_drivers[lld_no]->drv_state != DRIVER_INIT) {
+		if (lld_no < 0 ||
+		   (tgt_drivers[lld_no]->drv_state != DRIVER_INIT &&
+		    req->mode != MODE_LLD))
+		{
 			if (lld_no < 0)
 				eprintf("can't find the driver %s\n", req->lld);
 			else
@@ -435,11 +539,17 @@ static tgtadm_err mtask_execute(struct mgmt_task *mtask)
 	case MODE_ACCOUNT:
 		adm_err = account_mgmt(lld_no, mtask);
 		break;
+	case MODE_SESSION:
+		adm_err = session_mgmt(lld_no, mtask);
+		break;
 	case MODE_CONNECTION:
 		adm_err = connection_mgmt(lld_no, mtask);
 		break;
 	case MODE_BACKINGSTORE:
 		adm_err = backingstore_mgmt(lld_no, mtask);
+		break;
+	case MODE_LLD:
+		adm_err = lld_mgmt(lld_no, mtask);
 		break;
 	default:
 		if (req->op == OP_SHOW && tgt_drivers[lld_no]->show) {
@@ -615,13 +725,8 @@ static void mtask_recv_send_handler(int fd, int events, void *data)
 		err = concat_write(&mtask->rsp_concat, fd, mtask->done);
 		if (err >= 0) {
 			mtask->done += err;
-			if (mtask->done == (rsp->len - sizeof(*rsp))) {
-				if (req->mode == MODE_SYSTEM &&
-				    req->op == OP_DELETE &&
-				    !rsp->err)
-					system_active = 0;
+			if (mtask->done == (rsp->len - sizeof(*rsp)))
 				goto out;
-			}
 		} else
 			if (errno != EAGAIN)
 				goto out;
@@ -633,6 +738,8 @@ static void mtask_recv_send_handler(int fd, int events, void *data)
 
 	return;
 out:
+	if (req->mode == MODE_SYSTEM && req->op == OP_DELETE && !rsp->err)
+		system_active = 0;
 	tgt_event_del(fd);
 	close(fd);
 	mtask_free(mtask);

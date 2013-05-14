@@ -60,6 +60,11 @@ ifneq ($(OS),Cygwin)
 LIBS += -rdynamic
 endif
 
+ifneq ($(CEPH_RBD),)
+TGTD_OBJS += bs_rbd.o
+LIBS += -lrados -lrbd
+endif
+
 ifneq ($(shell test -e /usr/include/sys/eventfd.h && test -e /usr/include/libaio.h && echo 1),)
 CFLAGS += -DUSE_EVENTFD
 TGTD_OBJS += bs_aio.o

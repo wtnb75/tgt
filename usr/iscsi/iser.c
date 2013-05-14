@@ -97,6 +97,7 @@ struct iscsi_sense_data {
 } __packed;
 
 static size_t buf_pool_sz_mb = DEFAULT_POOL_SIZE_MB;
+static int cq_vector = -1;
 
 static int membuf_num;
 static size_t membuf_size = RDMA_TRANSFER_SIZE;
@@ -668,6 +669,24 @@ static int iser_init_rdma_buf_pool(struct iser_device *dev)
 	}
 
 	return 0;
+}
+
+static void iser_destroy_rdma_buf_pool(struct iser_device *dev)
+{
+        int err;
+
+	assert(list_empty(&dev->membuf_alloc));
+
+	err = ibv_dereg_mr(dev->membuf_mr);
+	if (err)
+		eprintf("ibv_dereg_mr failed: (errno=%d %m)\n", errno);
+
+	iser_free_pool(dev->membuf_regbuf, dev->rdma_hugetbl_shmid);
+	free(dev->membuf_listbuf);
+
+	dev->membuf_mr = NULL;
+	dev->membuf_regbuf = NULL;
+	dev->membuf_listbuf = NULL;
 }
 
 static struct iser_membuf *iser_dev_alloc_rdma_buf(struct iser_device *dev)
@@ -1982,7 +2001,6 @@ static void iser_scsi_cmd_iosubmit(struct iser_task *task, int not_last)
 	scsi_set_out_length(scmd, 0);
 
 	if (task->is_write) {
-		scsi_set_out_resid(scmd, 0);
 		/* It's either the last buffer, which is RDMA,
 		   or the only buffer */
 		data_buf = list_entry(task->out_buf_list.prev,
@@ -2005,7 +2023,6 @@ static void iser_scsi_cmd_iosubmit(struct iser_task *task, int not_last)
 		scsi_set_out_length(scmd, task->out_len);
 	}
 	if (task->is_read) {
-		scsi_set_in_resid(scmd, 0);
 		/* ToDo: multiple RDMA-Read buffers */
 		data_buf = list_entry(task->in_buf_list.next,
 				      struct iser_membuf, task_list);
@@ -2031,32 +2048,6 @@ static void iser_scsi_cmd_iosubmit(struct iser_task *task, int not_last)
 	target_cmd_queue(session->target->tid, scmd);
 }
 
-static void iser_rsp_set_read_resid(struct iscsi_cmd_rsp *rsp_bhs,
-				    int in_resid)
-{
-	if (in_resid > 0) {
-		rsp_bhs->flags |= ISCSI_FLAG_CMD_UNDERFLOW;
-		rsp_bhs->residual_count = cpu_to_be32((uint32_t)in_resid);
-	} else {
-		rsp_bhs->flags |= ISCSI_FLAG_CMD_OVERFLOW;
-		rsp_bhs->residual_count = cpu_to_be32(((uint32_t)-in_resid));
-	}
-	rsp_bhs->bi_residual_count = 0;
-}
-
-static void iser_rsp_set_bidir_resid(struct iscsi_cmd_rsp *rsp_bhs,
-				     int in_resid)
-{
-	if (in_resid > 0) {
-		rsp_bhs->flags |= ISCSI_FLAG_CMD_BIDI_UNDERFLOW;
-		rsp_bhs->bi_residual_count = cpu_to_be32((uint32_t)in_resid);
-	} else {
-		rsp_bhs->flags |= ISCSI_FLAG_CMD_BIDI_OVERFLOW;
-		rsp_bhs->bi_residual_count = cpu_to_be32(((uint32_t)-in_resid));
-	}
-	rsp_bhs->residual_count = 0;
-}
-
 static int iser_scsi_cmd_done(uint64_t nid, int result,
 			      struct scsi_cmd *scmd)
 {
@@ -2066,7 +2057,6 @@ static int iser_scsi_cmd_done(uint64_t nid, int result,
 	struct iser_conn *conn = task->conn;
 	struct iscsi_session *session = conn->h.session;
 	unsigned char sense_len = scmd->sense_len;
-	int in_resid;
 
 	assert(nid == scmd->cmd_itn_id);
 
@@ -2090,21 +2080,12 @@ static int iser_scsi_cmd_done(uint64_t nid, int result,
 	iser_set_rsp_stat_sn(session, task->pdu.bhs);
 	rsp_bhs->exp_datasn = 0;
 
+	iscsi_rsp_set_residual(rsp_bhs, scmd);
 	if (task->is_read) {
-		in_resid = scsi_get_in_resid(scmd);
-		if (in_resid != 0) {
-			if (!task->is_write)
-				iser_rsp_set_read_resid(rsp_bhs, in_resid);
-			else
-				iser_rsp_set_bidir_resid(rsp_bhs, in_resid);
-			if (in_resid > 0)
-				task->rdma_wr_remains = task->in_len - in_resid;
-		}
-		/* schedule_rdma_write(task, conn); // ToDo: need this? */
-	} else {
-		rsp_bhs->bi_residual_count = 0;
-		rsp_bhs->residual_count = 0;
+		task->rdma_wr_remains = scsi_get_in_transfer_len(scmd);
+		task->rdma_wr_sz = scsi_get_in_transfer_len(scmd);
 	}
+
 	task->pdu.ahssize = 0;
 	task->pdu.membuf.size = 0;
 
@@ -2406,7 +2387,6 @@ static int iser_scsi_cmd_rx(struct iser_task *task)
 			task->unsol_remains = 0;
 			task->rdma_rd_sz = 0;
 			task->rdma_rd_remains = 0;
-
 		} else {
 			scsi_set_data_dir(&task->scmd, DATA_NONE);
 			task->out_len = 0;
@@ -2717,6 +2697,8 @@ static int iser_parse_req_headers(struct iser_task *task)
 	struct iser_conn *conn = task->conn;
 	struct iser_hdr *iser_hdr = task->pdu.iser_hdr;
 	struct iscsi_hdr *iscsi_hdr = task->pdu.bhs;
+	unsigned pdu_dlength = ntoh24(iscsi_hdr->dlength);
+	unsigned pdu_len = pdu_dlength + sizeof(struct iscsi_hdr);
 	int err = -1;
 
 	switch (iser_hdr->flags & 0xF0) {
@@ -2754,12 +2736,14 @@ static int iser_parse_req_headers(struct iser_task *task)
 
 	task->pdu.ahssize = iscsi_hdr->hlength * 4;
 	task->pdu.membuf.addr += task->pdu.ahssize;
-	task->pdu.membuf.size = ntoh24(iscsi_hdr->dlength);
+	pdu_len += task->pdu.ahssize;
+	task->pdu.membuf.size = pdu_dlength;
 	task->pdu.membuf.rdma = 0;
 
 	task->tag = iscsi_hdr->itt;
 	task->cmd_sn = be32_to_cpu(iscsi_hdr->statsn);
 	conn->h.exp_stat_sn = be32_to_cpu(iscsi_hdr->exp_statsn);
+	iscsi_update_conn_stats_rx(&conn->h, pdu_len, task->opcode);
 
 	return err;
 }
@@ -2884,9 +2868,11 @@ static void iser_tx_complete_handler(struct iser_work_req *txd)
 {
 	struct iser_task *task = txd->task;
 	struct iser_conn *conn = task->conn;
+	int opcode = task->pdu.bhs->opcode & ISCSI_OPCODE_MASK;
 
-	dprintf("conn:%p task:%p tag:0x%04"PRIx64 "\n",
-		&conn->h, task, task->tag);
+	iscsi_update_conn_stats_tx(&conn->h, txd->sge.length, opcode);
+	dprintf("conn:%p task:%p tag:0x%04"PRIx64 " opcode:0x%x\n",
+		&conn->h, task, task->tag, opcode);
 	iser_conn_put(conn);
 
 	list_del(&task->tx_list); /* remove from conn->sent_list */
@@ -2909,6 +2895,7 @@ static void iser_rdma_wr_complete_handler(struct iser_work_req *rdmad)
 	struct iser_task *task = rdmad->task;
 	struct iser_conn *conn = task->conn;
 
+	iscsi_update_conn_stats_tx(&conn->h, rdmad->sge.length, ISCSI_OP_SCSI_DATA_IN);
 	dprintf("conn:%p task:%p tag:0x%04"PRIx64 "\n",
 		&conn->h, task, task->tag);
 	iser_conn_put(conn);
@@ -2922,6 +2909,7 @@ static void iser_rdma_rd_complete_handler(struct iser_work_req *rdmad)
 	struct iser_task *task = rdmad->task;
 	struct iser_conn *conn = task->conn;
 
+	iscsi_update_conn_stats_rx(&conn->h, rdmad->sge.length, ISCSI_OP_SCSI_DATA_OUT);
 	task->rdma_rd_remains -= rdmad->sge.length;
 	dprintf("conn:%p task:%p tag:0x%04"PRIx64 ", rems rdma:%d unsol:%d\n",
 		&conn->h, task, task->tag, task->rdma_rd_remains,
@@ -3277,8 +3265,18 @@ static int iser_device_init(struct iser_device *dev)
 		goto out;
 	}
 
+	/* verify cq_vector */
+	if (cq_vector < 0)
+		cq_vector = control_port % dev->ibv_ctxt->num_comp_vectors;
+	else if (cq_vector >= dev->ibv_ctxt->num_comp_vectors) {
+		eprintf("Bad CQ vector. max: %d\n",
+			dev->ibv_ctxt->num_comp_vectors);
+		goto out;
+	}
+	dprintf("CQ vector: %d\n", cq_vector);
+
 	dev->cq = ibv_create_cq(dev->ibv_ctxt, cqe_num, NULL,
-				dev->cq_channel, 0);
+				dev->cq_channel, cq_vector);
 	if (dev->cq == NULL) {
 		eprintf("ibv_create_cq failed\n");
 		goto out;
@@ -3310,6 +3308,31 @@ static int iser_device_init(struct iser_device *dev)
 
 out:
 	return err;
+}
+
+static void iser_device_release(struct iser_device *dev)
+{
+	int err;
+
+	list_del(&dev->list);
+
+	tgt_event_del(dev->ibv_ctxt->async_fd);
+	tgt_event_del(dev->cq_channel->fd);
+	tgt_remove_sched_event(&dev->poll_sched);
+
+	err = ibv_destroy_cq(dev->cq);
+	if (err)
+		eprintf("ibv_destroy_cq failed: (errno=%d %m)\n", errno);
+
+	err = ibv_destroy_comp_channel(dev->cq_channel);
+	if (err)
+		eprintf("ibv_destroy_comp_channel failed: (errno=%d %m)\n", errno);
+
+	iser_destroy_rdma_buf_pool(dev);
+
+	err = ibv_dealloc_pd(dev->pd);
+	if (err)
+		eprintf("ibv_dealloc_pd failed: (errno=%d %m)\n", errno);
 }
 
 /*
@@ -3371,6 +3394,27 @@ static int iser_ib_init(void)
 	return err;
 }
 
+static void iser_ib_release(void)
+{
+	int err;
+	struct iser_device *dev, *tdev;
+
+	assert(list_empty(&iser_conn_list));
+
+	list_for_each_entry_safe(dev, tdev, &iser_dev_list, list) {
+	        iser_device_release(dev);
+		free(dev);
+	}
+
+	tgt_event_del(cma_listen_id->channel->fd);
+
+	err = rdma_destroy_id(cma_listen_id);
+	if (err)
+		eprintf("rdma_destroy_id failed: (errno=%d %m)\n", errno);
+
+	rdma_destroy_event_channel(rdma_evt_channel);
+}
+
 static int iser_send_nop = 1;
 static struct tgt_work nop_work;
 
@@ -3418,6 +3462,8 @@ static void iser_exit(void)
 {
 	if (iser_send_nop)
 		del_work(&nop_work);
+
+	iser_ib_release();
 }
 
 static int iser_target_create(struct target *t)
@@ -3444,6 +3490,7 @@ static const char *lld_param_nop = "nop";
 static const char *lld_param_on = "on";
 static const char *lld_param_off = "off";
 static const char *lld_param_pool_sz_mb = "pool_sz_mb";
+static const char *lld_param_cq_vector = "cq_vector";
 
 static int iser_param_parser(char *p)
 {
@@ -3482,6 +3529,16 @@ static int iser_param_parser(char *p)
 			buf_pool_sz_mb = atoi(q);
 			if (buf_pool_sz_mb < 128)
 				buf_pool_sz_mb = 128;
+		} else if (!strncmp(p, lld_param_cq_vector,
+				    strlen(lld_param_cq_vector))) {
+			q = p + strlen(lld_param_cq_vector) + 1;
+			cq_vector = atoi(q);
+			if (cq_vector < 0) {
+				eprintf("unsupported value for param: %s\n",
+					lld_param_cq_vector);
+				err = -EINVAL;
+				break;
+			}
 		} else {
 			dprintf("unsupported param:%s\n", p);
 			err = -EINVAL;
@@ -3514,6 +3571,7 @@ static struct tgt_driver iser = {
 
 	.update 		= iscsi_target_update,
 	.show 			= iscsi_target_show,
+	.stat                   = iscsi_stat,
 	.cmd_end_notify 	= iser_scsi_cmd_done,
 	.mgmt_end_notify	= iser_tm_done,
 	.transportid    	= iscsi_transportid,

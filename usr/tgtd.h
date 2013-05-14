@@ -92,9 +92,31 @@ struct ua_sense {
 	int ua_sense_len;
 };
 
+struct lu_stat {
+	uint64_t rd_subm_bytes;
+	uint64_t rd_done_bytes;
+
+	uint64_t wr_subm_bytes;
+	uint64_t wr_done_bytes;
+
+	uint32_t rd_subm_cmds;
+	uint32_t rd_done_cmds;
+
+	uint32_t wr_subm_cmds;
+	uint32_t wr_done_cmds;
+
+	uint32_t bidir_subm_cmds;
+	uint32_t bidir_done_cmds;
+
+	uint32_t err_num;
+};
+
 struct it_nexus_lu_info {
 	struct scsi_lu *lu;
-	struct list_head lu_info_siblings;
+	uint64_t itn_id;
+	struct lu_stat stat;
+	struct list_head itn_itl_info_siblings;
+	struct list_head lu_itl_info_siblings;
 	struct list_head pending_ua_sense_list;
 	int prevent; /* prevent removal on this itl nexus ? */
 };
@@ -146,6 +168,7 @@ struct backingstore_template {
 };
 
 struct mode_pg {
+	struct list_head mode_pg_siblings;
 	uint8_t pcode;		/* Page code */
 	uint8_t subpcode;	/* Sub page code */
 	int16_t pcode_size;	/* Size of page code data. */
@@ -174,6 +197,8 @@ struct scsi_lu {
 	/* the list of devices belonging to a target */
 	struct list_head device_siblings;
 
+	struct list_head lu_itl_info_list;
+
 	struct tgt_cmd_queue cmd_queue;
 
 	uint64_t reserve_id;
@@ -186,7 +211,7 @@ struct scsi_lu {
 	struct target *tgt;
 
 	uint8_t	mode_block_descriptor[BLOCK_DESCRIPTOR_LEN];
-	struct mode_pg *mode_pgs[0x3f];
+	struct list_head mode_pages;
 
 	struct lu_phy_attr attrs;
 
@@ -245,6 +270,7 @@ extern char *tgt_targetname(int tid);
 extern tgtadm_err tgt_target_show_all(struct concat_buf *b);
 tgtadm_err system_set_state(char *str);
 tgtadm_err system_show(int mode, struct concat_buf *b);
+tgtadm_err lld_show(struct concat_buf *b);
 int is_system_available(void);
 int is_system_inactive(void);
 
@@ -284,6 +310,7 @@ extern enum mgmt_req_result target_mgmt_request(int tid, uint64_t itn_id,
 						uint8_t *lun, uint64_t tag,
 						int host_no);
 
+extern struct it_nexus *it_nexus_lookup(int tid, uint64_t itn_id);
 extern void target_cmd_io_done(struct scsi_cmd *cmd, int result);
 extern int ua_sense_del(struct scsi_cmd *cmd, int del);
 extern void ua_sense_clear(struct it_nexus_lu_info *itn_lu, uint16_t asc);
@@ -315,6 +342,15 @@ extern tgtadm_err iqn_acl_add(int tid, char *name);
 extern tgtadm_err iqn_acl_del(int tid, char *name);
 extern char *iqn_acl_get(int tid, int idx);
 
+extern void tgt_stat_header(struct concat_buf *b);
+extern void tgt_stat_line(int tid, uint64_t lun, uint64_t sid, struct lu_stat *stat, struct concat_buf *b);
+extern void tgt_stat_device(struct target *target, struct scsi_lu *lu, struct concat_buf *b);
+
+extern tgtadm_err tgt_stat_device_by_id(int tid, uint64_t dev_id, struct concat_buf *b);
+extern tgtadm_err tgt_stat_target(struct target *target, struct concat_buf *b);
+extern tgtadm_err tgt_stat_target_by_id(int tid, struct concat_buf *b);
+extern tgtadm_err tgt_stat_system(struct concat_buf *b);
+
 extern int account_lookup(int tid, int type, char *user, int ulen, char *password, int plen);
 extern tgtadm_err account_add(char *user, char *password);
 extern tgtadm_err account_del(char *user);
@@ -335,6 +371,8 @@ extern int register_backingstore_template(struct backingstore_template *bst);
 extern struct backingstore_template *get_backingstore_template(const char *name);
 extern int backingstore_show(struct concat_buf *buf);
 extern int backingstore_new(char *buf, size_t sz);
+
+extern int lld_init_one(int lld_index);
 
 extern int setup_param(char *name, int (*parser)(char *));
 

@@ -15,6 +15,9 @@ enum tgtadm_op {
 	OP_BIND,
 	OP_UNBIND,
 	OP_UPDATE,
+	OP_STATS,
+	OP_START,
+	OP_STOP,
 };
 
 enum tgtadm_mode {
@@ -22,6 +25,7 @@ enum tgtadm_mode {
 	MODE_TARGET,
 	MODE_DEVICE,
 	MODE_PORTAL,
+	MODE_LLD,
 
 	MODE_SESSION,
 	MODE_CONNECTION,

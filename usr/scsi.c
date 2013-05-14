@@ -133,10 +133,12 @@ uint64_t scsi_rw_offset(uint8_t *scb)
 	case READ_16:
 	case PRE_FETCH_16:
 	case WRITE_16:
+	case ORWRITE_16:
 	case VERIFY_16:
 	case WRITE_VERIFY_16:
 	case WRITE_SAME_16:
 	case SYNCHRONIZE_CACHE_16:
+	case COMPARE_AND_WRITE:
 		off = (uint64_t)scb[2] << 56 | (uint64_t)scb[3] << 48 |
 			(uint64_t)scb[4] << 40 | (uint64_t)scb[5] << 32 |
 			(uint64_t)scb[6] << 24 | (uint64_t)scb[7] << 16 |
@@ -180,12 +182,16 @@ uint32_t scsi_rw_count(uint8_t *scb)
 	case READ_16:
 	case PRE_FETCH_16:
 	case WRITE_16:
+	case ORWRITE_16:
 	case VERIFY_16:
 	case WRITE_VERIFY_16:
 	case WRITE_SAME_16:
 	case SYNCHRONIZE_CACHE_16:
 		cnt = (uint32_t)scb[10] << 24 | (uint32_t)scb[11] << 16 |
 			(uint32_t)scb[12] << 8 | (uint32_t)scb[13];
+		break;
+	case COMPARE_AND_WRITE:
+		cnt = (uint32_t)scb[13];
 		break;
 	default:
 		cnt = 0;
@@ -200,6 +206,18 @@ int scsi_cmd_perform(int host_no, struct scsi_cmd *cmd)
 	int ret;
 	unsigned char op = cmd->scb[0];
 	struct it_nexus_lu_info *itn_lu;
+
+	if (scsi_get_data_dir(cmd) == DATA_WRITE) {
+		cmd->itn_lu_info->stat.wr_subm_bytes += scsi_get_out_length(cmd);
+		cmd->itn_lu_info->stat.wr_subm_cmds++;
+	} else if (scsi_get_data_dir(cmd) == DATA_READ) {
+		cmd->itn_lu_info->stat.rd_subm_bytes += scsi_get_in_length(cmd);
+		cmd->itn_lu_info->stat.rd_subm_cmds++;
+	} else if (scsi_get_data_dir(cmd) == DATA_BIDIRECTIONAL) {
+		cmd->itn_lu_info->stat.wr_subm_bytes += scsi_get_out_length(cmd);
+		cmd->itn_lu_info->stat.rd_subm_bytes += scsi_get_in_length(cmd);
+		cmd->itn_lu_info->stat.bidir_subm_cmds++;
+	}
 
 	if (CDB_CONTROL(cmd) & ((1U << 0) | (1U << 2))) {
 		/*
@@ -235,8 +253,8 @@ int scsi_cmd_perform(int host_no, struct scsi_cmd *cmd)
 		break;
 	case REPORT_LUNS:
 		list_for_each_entry(itn_lu,
-				    &cmd->it_nexus->it_nexus_lu_info_list,
-				    lu_info_siblings)
+				    &cmd->it_nexus->itn_itl_info_list,
+				    itn_itl_info_siblings)
 			ua_sense_clear(itn_lu,
 				       ASC_REPORTED_LUNS_DATA_HAS_CHANGED);
 		break;
@@ -275,8 +293,10 @@ int scsi_is_io_opcode(unsigned char op)
 	case WRITE_VERIFY_12:
 	case READ_16:
 	case WRITE_16:
+	case ORWRITE_16:
 	case VERIFY_16:
 	case WRITE_VERIFY_16:
+	case COMPARE_AND_WRITE:
 		ret = 1;
 		break;
 	default:
@@ -294,9 +314,13 @@ enum data_direction scsi_data_dir_opcode(unsigned char op)
 	switch (op) {
 	case WRITE_6:
 	case WRITE_10:
-	case WRITE_VERIFY:
 	case WRITE_12:
 	case WRITE_16:
+	case ORWRITE_16:
+	case WRITE_VERIFY:
+	case WRITE_VERIFY_12:
+	case WRITE_VERIFY_16:
+	case COMPARE_AND_WRITE:
 		dir = DATA_WRITE;
 		break;
 	default:
